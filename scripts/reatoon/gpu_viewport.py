@@ -70,20 +70,26 @@ def _smooth_world(fn,path,divisions):
 
 
 class LiveScene:
-    def __init__(self, camera_path, settings, camera,retained=False):
+    def __init__(self, camera_path, settings, camera,retained=False,geometry_cache=None):
         started=time.perf_counter()
         self.scene = maya_scene.export_scene(camera_path.fullPathName(),settings,camera_override=camera,
                                             include_normals=False,geometry_purpose='viewport',
                                             include_materials=False,as_arrays=True,
-                                            mesh_filter=None if retained else camera.get('_viewport_mesh_filter'))
+                                            mesh_filter=None if retained else camera.get('_viewport_mesh_filter'),geometry_cache=geometry_cache)
         exported=time.perf_counter()
         self.empty=not self.scene['meshes']
+        if retained and len(self.scene['meshes'])<=256:
+            for mesh in self.scene['meshes']:mesh['_retain_topology']=True
         if self.empty:
             self.gpu=None
             return
         if retained or sum(len(m['triangles']) for m in self.scene['meshes'])>3000000:
             from .gpu_paged import PagedGPUScene
-            self.gpu=PagedGPUScene(self.scene['meshes'],retain_planes=retained)
+            triangles=sum(len(m['triangles']) for m in self.scene['meshes'])
+            # A medium scene fits one bounded page; avoid a second BVH query
+            # and transfers for contacts crossing an arbitrary page boundary.
+            target=750000 if retained and triangles<=750000 else 400000
+            self.gpu=PagedGPUScene(self.scene['meshes'],page_triangle_target=target,retain_planes=retained)
         else:
             try:self.gpu = GPUScene(self.scene['meshes'])
             except ValueError as error:
@@ -98,8 +104,15 @@ class LiveScene:
         self.smooth_inputs=[]
         self.fast_functions=[]
         self.level_plugs=[]
+        self.dirty_dependencies={}
+        self.export_inputs=[]
         for mesh in self.scene['meshes']:
             path = maya_scene._dag(mesh['name'])
+            parent=om.MDagPath(path)
+            while parent.length():
+                key=om.MObjectHandle(parent.node()).hashCode()
+                self.dirty_dependencies.setdefault(key,set()).add(len(self.paths))
+                parent.pop()
             selection=om1.MSelectionList();selection.add(mesh['name'])
             old_path=om1.MDagPath();selection.getDagPath(0,old_path)
             fn=om1.MFnMesh(old_path)
@@ -127,6 +140,7 @@ class LiveScene:
                     if np.array_equal(np.asarray(tri2).reshape(-1,3),mesh['triangles']):plug=candidate
             self.smooth_plugs.append(plug)
             self.smooth_inputs.append(_smooth_input(fn,path,fn2) if self.smooth_levels[-1] else None)
+            self.export_inputs.append(self.smooth_inputs[-1] if self.smooth_levels[-1] else (_raw_local(fn),np.asarray(path.inclusiveMatrix(),np.float64).reshape(4,4),None))
         self.positions = np.concatenate([np.asarray(m['vertices'],np.float64) for m in self.scene['meshes']])
         self.generation = -1
         self.cache_key = None
@@ -139,14 +153,43 @@ class LiveScene:
             live_binding_ms=(time.perf_counter()-constructed)*1000,
             construction_ms=(time.perf_counter()-started)*1000,
             cached_preview_meshes=sum(p is not None for p in self.smooth_plugs))
+        self.startup_report['reused_mesh_exports']=len(geometry_cache or {})
+        from . import viewport
+        viewport._geometry_dirty_objects.clear()
 
     def close(self):
         if self.gpu is not None:self.gpu.close()
 
+    def smooth_rebuild_cache(self):
+        """Reuse only unchanged native geometry after a smooth-setting edit.
+
+        Called only for smooth-only invalidation; all other topology/material/
+        edge changes use a full export. Exact evaluated base points, transform,
+        smooth options and creases guard against concurrent animation edits.
+        """
+        cache={}
+        for i,mesh in enumerate(self.scene['meshes']):
+            if '_native_evaluated' not in mesh or mesh.get('alpha_boundary'):continue
+            fn=self.functions[i];path=self.paths[i];fn.syncObject()
+            display,level=self.level_plugs[i]
+            current_level=max(0,level.asInt()) if display.asInt() else 0
+            if current_level!=self.smooth_levels[i] or (fn.numVertices(),fn.numPolygons())!=self.counts[i]:continue
+            current=(_smooth_input(fn,path,self.fast_functions[i]) if current_level else
+                     (_raw_local(fn),np.asarray(path.inclusiveMatrix(),np.float64).reshape(4,4),None))
+            previous=self.export_inputs[i]
+            if current[2]==previous[2] and np.array_equal(current[0],previous[0]) and np.array_equal(current[1],previous[1]):
+                cache[mesh['name']]=dict(geometry=mesh['_native_evaluated'],topology=mesh.get('_gpu_topology'))
+        return cache
+
     def update(self):
         """Borrow raw doubles only while copying; never retain Maya-owned pointers."""
         changed = []
+        from . import viewport
+        dirty=set(viewport._geometry_dirty_objects);viewport._geometry_dirty_objects.clear()
+        indices=set().union(*(self.dirty_dependencies.get(k,set()) for k in dirty)) if dirty else None
+        if dirty and not indices:indices=None
         for i,(path,fn,counts) in enumerate(zip(self.paths,self.functions,self.counts)):
+            if indices is not None and i not in indices:continue
             fn.syncObject()
             if (fn.numVertices(),fn.numPolygons())!=counts:
                 raise ValueError('GPU topology changed; rebuild required')

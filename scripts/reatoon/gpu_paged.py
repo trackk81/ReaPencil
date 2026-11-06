@@ -89,7 +89,7 @@ class _Page:
     def __init__(self, ids, meshes, directory):
         self.ids=np.asarray(ids,np.int32);self.meshes=[meshes[i] for i in ids]
         self.directory=directory;self.gpu=None;self.frozen=None;self.style_key=None
-        self.dirty=False;self.backing_bytes=0
+        self.dirty=False;self.changed=set();self.backing_bytes=0
         self.geometry_version=0;self.backing_versions={}
 
     def freeze(self,keep_core=False):
@@ -122,7 +122,7 @@ class _Page:
     def thaw(self,runtime,mode='full'):
         full=mode=='full' or self.dirty
         if self.gpu is None:
-            self.gpu=GPUScene(self.meshes,max_intersections=32768,runtime=runtime)
+            self.gpu=GPUScene(self.meshes,max_intersections=(262144 if any(m.get("_retain_topology") for m in self.meshes) else 32768),runtime=runtime)
             self.gpu.clip_edges=True
         elif self.frozen is not None:
             entries=self.frozen
@@ -137,7 +137,8 @@ class _Page:
                 setattr(self.gpu,name,buffer)
             if full:self.frozen=None
         if self.dirty:
-            self.gpu.update(np.concatenate([m['vertices'] for m in self.meshes]))
+            self.gpu.update(np.concatenate([m['vertices'] for m in self.meshes]),changed_meshes=sorted(self.changed) or None)
+            self.changed.clear()
             self.geometry_version+=1
             self.dirty=False
         if mode=='core' and self.frozen is None:self.freeze(keep_core=True)
@@ -235,7 +236,7 @@ class PagedGPUScene:
         if key not in self._pass_caches:
             targeted=np.asarray([np.any(v>=0) or (selected_edges is not None and any(len(p) for p in selected_edges[i].values()))
                                  for i,v in enumerate(face_style_ids)],bool)
-            self._pass_caches[key]=dict(faces=face_style_ids,selected=selected_edges,within={},between={},key=None,
+            self._pass_caches[key]=dict(faces=face_style_ids,selected=selected_edges,within={},between={},dirty={},key=None,
                 edge_pages=np.asarray([np.any(targeted[p.ids]) for p in self.pages]))
         self._pass_caches.move_to_end(key)
         while len(self._pass_caches)>8:self._pass_caches.popitem(last=False)
@@ -251,10 +252,13 @@ class PagedGPUScene:
             self.bounds[index]=[points.min(axis=0),points.max(axis=0)]
         dirty=set()
         for i,page in enumerate(self.pages):
-            if changed.intersection(page.ids):page.dirty=True;dirty.add(i)
+            if changed.intersection(page.ids):
+                page.dirty=True;dirty.add(i);page.changed.update(j for j,k in enumerate(page.ids) if k in changed)
         for cache in self._pass_caches.values():
             for k in list(cache['within']):
-                if k in dirty:del cache['within'][k]
+                if k in dirty:
+                    if self.retain_planes:cache['dirty'].setdefault(k,set()).update(changed.intersection(self.pages[k].ids))
+                    else:del cache['within'][k]
             for k in list(cache['between']):
                 if dirty.intersection(k):del cache['between'][k]
         self._update_bounds();self.cross_cache=None
@@ -279,14 +283,14 @@ class PagedGPUScene:
             # so dense foliage cannot grow a giant output allocation.
             for start in range(0,n,a.capacity):
                 size=min(a.capacity,n-start)
-                pairs=r.buffer(r.read(a.candidates,(size,2),np.int32,offset=start*8))
+                pairs=a.candidates if self.retain_planes else r.buffer(r.read(a.candidates,(size,2),np.int32,offset=start*8))
                 try:
                     r.write(a.counter,np.zeros(1,np.int32))
                     r.run('retained_page_intersections' if self.retain_planes else 'page_intersections',size,a.vertices,a.triangles,a.owners,a.triangle_faces,a.lo,a.hi,
                           a.triangle_normals,a.metrics,a.modes,a.cross_output,a.cross_output_owners,a.cross_mesh_pairs,
                           a.counter,size,a.base,float(tolerance),a.capacity,pairs,a.triangle_styles,0,
                           b.vertices,b.triangles,b.owners,b.triangle_normals,b.metrics,b.triangle_styles,
-                          *([a.cross_sourceplanes] if self.retain_planes else []),local_size=64)
+                          *([a.cross_sourceplanes,start] if self.retain_planes else []),local_size=64)
                     found=int(r.read(a.counter,1,np.int32)[0])
                     if found:
                         results.append(r.read(a.cross_output,(found*2,4)))
@@ -296,37 +300,57 @@ class PagedGPUScene:
                             payload[:,0,3]=self.pages[ai].ids[payload[:,0,3].astype(np.int32)]
                             payload[:,1,3]=self.pages[bi].ids[payload[:,1,3].astype(np.int32)]
                             planes.append(payload)
-                finally:pairs.close()
+                finally:
+                    if not self.retain_planes:pairs.close()
         # The shared output scratch was used for cross-page strokes. Local
         # intersections are retained as CPU cache only; no resident direct read.
         result=(np.concatenate(results) if results else np.empty((0,4)),
                 np.concatenate(owners) if owners else np.empty(0,np.int32),candidates)
         return (*result,np.concatenate(planes) if planes else np.empty((0,2,4),np.float32)) if self.retain_planes else result
 
-    def _within(self,index,styles,tolerance):
+    def _within(self,index,styles,tolerance,previous=None,changed=()):
         a=self._load(index);r=self.runtime
         modes=np.asarray([[s.get('intersections',False),s.get('self_intersections',False)] for s in styles],np.int32)
         r.write(a.modes,modes);results=[];owners=[];planes=[];candidates=0
         if self.retain_planes and not hasattr(a,'cross_sourceplanes'):a.cross_sourceplanes=a.buf(a.capacity*32)
         pending=[(0,a.triangle_count)]
+        indexed=None
+        if self.retain_planes and previous is not None and changed:
+            local=[j for j,k in enumerate(self.pages[index].ids) if k in changed]
+            work=np.concatenate([a._mesh_triangle_indices[j] for j in local]).astype(np.int32)
+            if len(work)<a.triangle_count*.5:
+                wb=r.buffer(work);flags=np.zeros(len(a.meshes),np.int32);flags[local]=1;cb=r.buffer(flags)
+                try:
+                    r.write(a.counter,np.zeros(1,np.int32))
+                    r.run('candidates_indexed',len(work),a.triangles,a.owners,a.triangle_faces,a.lo,a.hi,a.modes,a.candidates,a.counter,a.triangle_count,a.base,float(tolerance),a.candidate_capacity,a.triangle_styles,wb,cb,len(work),local_size=64)
+                    count=int(r.read(a.counter,1,np.int32)[0])
+                finally:wb.close();cb.close()
+                if count<=a.candidate_capacity:
+                    indexed=count;pending=[(0,0)]
+                    keep=~np.isin(previous[3][:,:,3],list(changed)).any(axis=1)
+                    results.append(previous[0].reshape(-1,2,4)[keep].reshape(-1,4));owners.append(previous[1][keep]);planes.append(previous[3][keep])
         while pending:
-            first,count=pending.pop();r.write(a.counter,np.zeros(1,np.int32))
-            r.run('page_local_candidates',count,a.triangles,a.owners,a.triangle_faces,a.lo,a.hi,a.modes,
+            first,count=pending.pop()
+            if indexed is None:
+                r.write(a.counter,np.zeros(1,np.int32))
+                r.run('page_local_candidates',count,a.triangles,a.owners,a.triangle_faces,a.lo,a.hi,a.modes,
                   a.candidates,a.counter,a.triangle_count,a.base,float(tolerance),a.candidate_capacity,a.triangle_styles,
                   first,count,local_size=64)
-            n=int(r.read(a.counter,1,np.int32)[0])
+                n=int(r.read(a.counter,1,np.int32)[0])
+            else:n=indexed
             if n>a.candidate_capacity:
                 if count==1:raise RuntimeError('One triangle exceeds bounded GPU candidate storage')
                 half=count//2;pending.extend(((first,half),(first+half,count-half)));continue
             candidates+=n
             for start in range(0,n,a.capacity):
-                size=min(a.capacity,n-start);pairs=r.buffer(r.read(a.candidates,(size,2),np.int32,offset=start*8))
+                size=min(a.capacity,n-start)
+                pairs=a.candidates if self.retain_planes else r.buffer(r.read(a.candidates,(size,2),np.int32,offset=start*8))
                 try:
                     r.write(a.counter,np.zeros(1,np.int32))
                     r.run('retained_intersections' if self.retain_planes else 'intersections',size,a.vertices,a.triangles,a.owners,a.triangle_faces,a.lo,a.hi,
                           a.triangle_normals,a.metrics,a.modes,a.cross_output,a.cross_output_owners,a.cross_mesh_pairs,
                           a.counter,size,a.base,float(tolerance),a.capacity,pairs,a.triangle_styles,0,
-                          *([a.cross_sourceplanes] if self.retain_planes else []),local_size=64)
+                          *([a.cross_sourceplanes,start] if self.retain_planes else []),local_size=64)
                     found=int(r.read(a.counter,1,np.int32)[0])
                     if found:
                         results.append(r.read(a.cross_output,(found*2,4)));owners.append(r.read(a.cross_output_owners,found,np.int32))
@@ -334,7 +358,8 @@ class PagedGPUScene:
                             payload=r.read(a.cross_sourceplanes,(found,2,4),np.float32)
                             payload[:,:,3]=self.pages[index].ids[payload[:,:,3].astype(np.int32)]
                             planes.append(payload)
-                finally:pairs.close()
+                finally:
+                    if not self.retain_planes:pairs.close()
         result=(np.concatenate(results) if results else np.empty((0,4)),
                 np.concatenate(owners) if owners else np.empty(0,np.int32),candidates)
         return (*result,np.concatenate(planes) if planes else np.empty((0,2,4),np.float32)) if self.retain_planes else result
@@ -351,11 +376,16 @@ class PagedGPUScene:
                 modes=np.r_[np.asarray([m[column] for m in key[0]],bool),False]
                 targeted=np.asarray([np.any(modes[values]) for values in self._face_styles],bool)
                 return np.asarray([np.any(targeted[p.ids]) for p in self.pages])
-            cross_pages=mask(0);self_pages=mask(1)
+            masks=self._pass_cache.get('mode_masks') if self._pass_cache else None
+            if masks is None or masks[0]!=key[0]:
+                masks=(key[0],mask(0),mask(1))
+                if self._pass_cache is not None:self._pass_cache['mode_masks']=masks
+            _,cross_pages,self_pages=masks
             for i in self.active:
                 if not cross_pages[i] and not self_pages[i]:continue
-                if i not in self._cross_by_page:
-                    self._cross_by_page[i]=self._within(i,styles,tolerance)
+                dirty=self._pass_cache.get('dirty',{}).pop(i,set()) if self._pass_cache else set()
+                if i not in self._cross_by_page or dirty:
+                    self._cross_by_page[i]=self._within(i,styles,tolerance,self._cross_by_page.get(i),dirty)
                 item=self._cross_by_page[i];p,o,n=item[:3];points.append(p);owners.append(o);candidate_count+=n
                 if self.retain_planes:planes.append(item[3])
             if any(a for a,b in key[0]):

@@ -23,8 +23,9 @@
 #include <cstring>
 #include <sstream>
 #include <string>
+#include <cmath>
 using namespace MHWRender;
-struct Group {std::vector<float> positions,a;float width,color[4];unsigned style;MBoundingBox box;};
+struct Group {std::vector<float> positions,a;float width,color[4];unsigned style;int reuse=-1;MBoundingBox box;};
 struct Style {float width,color[4];};
 static std::vector<Style> styles;
 static unsigned activeStyle=0,styleVersion=0;
@@ -39,6 +40,22 @@ static bool retainedMode=true;
 static std::vector<Group> groups;
 static MMatrix vp;static int vw=0,vh=0;static unsigned version=0;
 static std::string effect;
+extern "C" __declspec(dllexport) void rt_edge_positions(const double* vertices,const int* topology,unsigned count,double* points,float* normals){
+    for(unsigned i=0;i<count;i++){
+        const int* ids=topology+i*8;
+        for(int endpoint=0;endpoint<2;endpoint++){
+            const double* p=vertices+ids[endpoint]*3;
+            for(int k=0;k<3;k++)points[i*6+endpoint*3+k]=p[k];
+            float* n=normals+i*8+endpoint*4;const int* triangle=ids+2+endpoint*3;
+            if(triangle[0]<0){n[0]=n[1]=n[2]=0;continue;}
+            const double *a=vertices+triangle[0]*3,*b=vertices+triangle[1]*3,*c=vertices+triangle[2]*3;
+            double u[3],v[3],q[3];for(int k=0;k<3;k++){u[k]=b[k]-a[k];v[k]=c[k]-a[k];}
+            for(int k=0;k<3;k++)q[k]=u[(k+1)%3]*v[(k+2)%3]-u[(k+2)%3]*v[(k+1)%3];
+            double length=std::max(1e-30,std::sqrt(q[0]*q[0]+q[1]*q[1]+q[2]*q[2]));
+            for(int k=0;k<3;k++)n[k]=float(q[k]/length);
+        }
+    }
+}
 struct Scope {std::vector<float> values;unsigned revision=0,uploaded=~0u;MTexture* texture=nullptr;bool restrictive=false;};
 static std::unordered_map<std::string,Scope> scopes;
 static bool checkCenterDepth=true;
@@ -130,6 +147,8 @@ extern "C" __declspec(dllexport) int rt_add(const double* p,unsigned n,float wid
     try{legacyPending->emplace_back(p,n,width,color,hidden!=0,hiddenColor,dashed!=0);return 1;}
     catch(...){legacyPending.reset();return 0;}
 }
+extern "C" __declspec(dllexport) unsigned rt_group_count(){return unsigned(groups.size());}
+extern "C" __declspec(dllexport) void rt_reuse(unsigned first,unsigned count){for(unsigned i=0;i<count;i++){groups.emplace_back();groups.back().reuse=int(first+i);}passBegin=groups.size();}
 extern "C" __declspec(dllexport) void rt_begin_pass(){passBegin=groups.size();}
 extern "C" __declspec(dllexport) void rt_style(unsigned id,float width,const float* color){
     if(styles.size()<=id)styles.resize(size_t(id)+1);activeStyle=id;
@@ -146,28 +165,26 @@ extern "C" __declspec(dllexport) int rt_add_retained(const double* points,const 
         if(!target){groups.emplace_back();target=&groups.back();target->style=activeStyle;target->width=width;for(int k=0;k<3;k++)target->color[k]=color[k];target->color[3]=1;}
         auto& g=*target;size_t start=g.positions.size()/3;
         g.positions.resize((start+size_t(count)*2)*3);g.a.resize((start+size_t(count)*2)*4);
-        for(unsigned i=0;i<count;i++)for(unsigned endpoint=0;endpoint<2;endpoint++){
-            auto source=size_t(i)*2+endpoint,index=start+source;
-            for(int c=0;c<3;c++)g.positions[index*3+c]=float(points[source*3+c]);
-            for(int c=0;c<4;c++)g.a[index*4+c]=normals[size_t(i)*8+endpoint*4+c];
-            g.box.expand(MPoint(points[source*3],points[source*3+1],points[source*3+2]));
+        double low[3]={points[0],points[1],points[2]},high[3]={points[0],points[1],points[2]};
+        for(size_t i=0;i<size_t(count)*2;i++)for(int k=0;k<3;k++){
+            double p=points[i*3+k];g.positions[(start+i)*3+k]=float(p);low[k]=std::min(low[k],p);high[k]=std::max(high[k],p);
         }
+        std::memcpy(g.a.data()+start*4,normals,size_t(count)*8*sizeof(float));
+        g.box.expand(MPoint(low[0],low[1],low[2]));g.box.expand(MPoint(high[0],high[1],high[2]));
         return 1;
     }catch(...){groups.clear();return 0;}
 }
 extern "C" __declspec(dllexport) void rt_end(){legacyCurrent=legacyPending;legacyPending.reset();++version;}
 struct GPUGroup {
     std::vector<std::pair<MString,MVertexBuffer*>> streams;
-    MIndexBuffer* indices=nullptr;MShaderInstance* shader=nullptr;
-    unsigned style=0;MBoundingBox box;
+    std::vector<std::unique_ptr<MVertexBuffer>> vertices;
+    std::unique_ptr<MIndexBuffer> indices;MShaderInstance* shader=nullptr;
+    unsigned style=0,count=0,revision=0;MBoundingBox box;
+    ~GPUGroup(){auto renderer=MRenderer::theRenderer();if(renderer&&shader)renderer->getShaderManager()->releaseShader(shader);}
 };
 struct GPUFrame {
     unsigned revision=~0u,styleRevision=~0u;
-    std::vector<std::unique_ptr<MVertexBuffer>> vertices;
-    std::vector<std::unique_ptr<MIndexBuffer>> indices;
-    std::vector<MShaderInstance*> shaders;
-    std::vector<GPUGroup> groups;
-    ~GPUFrame(){auto renderer=MRenderer::theRenderer();if(renderer)for(auto shader:shaders)renderer->getShaderManager()->releaseShader(shader);}
+    std::vector<std::shared_ptr<GPUGroup>> groups;
 };
 static std::shared_ptr<GPUFrame> frameCache;
 static MObjectHandle displayOwner;
@@ -226,10 +243,12 @@ public:
         if(!frameCache || frameCache->revision!=version){
             auto next=std::make_shared<GPUFrame>();
             for(unsigned j=0;j<groups.size();j++){
-                auto& g=groups[j];unsigned n=unsigned(g.positions.size()/3);if(!n)continue;
+                auto& g=groups[j];
+                if(g.reuse>=0){if(!frameCache||unsigned(g.reuse)>=frameCache->groups.size())throw std::runtime_error("Invalid retained group reuse");next->groups.push_back(frameCache->groups[g.reuse]);continue;}
+                unsigned n=unsigned(g.positions.size()/3);if(!n)continue;
                 auto shader=manager->getEffectsFileShader(effect.c_str(),"Main",nullptr,0,true,preDraw,postDraw);
                 if(!shader)throw std::runtime_error("Line shader allocation failed");
-                next->shaders.push_back(shader);GPUGroup gpu;gpu.shader=shader;gpu.style=g.style;gpu.box=g.box;
+                auto block=std::make_shared<GPUGroup>();auto& gpu=*block;gpu.shader=shader;gpu.style=g.style;gpu.box=g.box;gpu.count=n;gpu.revision=version;
                 shader->setParameter("lineColor",g.color);shader->setParameter("lineWidth",g.width);
                 MVertexBufferDescriptorList descriptors;shader->requiredVertexBuffers(descriptors);
                 for(int i=0;i<descriptors.length();i++){
@@ -240,27 +259,29 @@ public:
                     auto data=buffer->acquire(n,true);if(!data)throw std::runtime_error("Vertex allocation failed");
                     if(values.size()!=size_t(n)*descriptor.dimension())throw std::runtime_error("Shader stream dimension mismatch");
                     std::memcpy(data,values.data(),values.size()*sizeof(float));buffer->commit(data);
-                    MString name=position?"positions":"normalA";gpu.streams.emplace_back(name,buffer.get());next->vertices.push_back(std::move(buffer));
+                    MString name=position?"positions":"normalA";gpu.streams.emplace_back(name,buffer.get());gpu.vertices.push_back(std::move(buffer));
                 }
                 auto ib=std::make_unique<MIndexBuffer>(MGeometry::kUnsignedInt32);
                 auto ids=static_cast<unsigned*>(ib->acquire(n,true));if(!ids)throw std::runtime_error("Index allocation failed");
                 for(unsigned i=0;i<n;i++)ids[i]=i;ib->commit(ids);
-                gpu.indices=ib.get();next->indices.push_back(std::move(ib));next->groups.push_back(std::move(gpu));
+                gpu.indices=std::move(ib);next->groups.push_back(block);
                 std::vector<float>().swap(g.positions);std::vector<float>().swap(g.a);
             }
             next->revision=version;frameCache=std::move(next);groups.clear();
         }
         if(resources!=frameCache){
+            // Rebind even reused buffers: VP2 consolidates render-item state.
+            // Skipping unchanged items can retain stale consolidated geometry.
             clear(container);resources=frameCache;
-            for(size_t j=0;j<resources->groups.size();++j){auto& g=resources->groups[j];
+            for(size_t j=0;j<resources->groups.size();++j){auto& g=*resources->groups[j];
                 auto item=MRenderItem::Create(MString("reaPencil_")+int(j),MRenderItem::DecorationItem,MGeometry::kLines);
                 item->setDrawMode(MGeometry::kAll);item->enable(true);item->setShader(g.shader);container.add(item);
                 MVertexBufferArray streams;for(auto& stream:g.streams)streams.addBuffer(stream.first,stream.second);
                 if(!setGeometryForRenderItem(*item,streams,*g.indices,&g.box))throw std::runtime_error("Shader geometry binding failed");
             }
         }
-        if(resources->styleRevision!=styleVersion){for(auto& g:resources->groups)if(g.style<styles.size()){
-            auto& s=styles[g.style];g.shader->setParameter("lineColor",s.color);g.shader->setParameter("lineWidth",s.width);
+        if(resources->styleRevision!=styleVersion){for(auto& block:resources->groups)if(block->style<styles.size()){
+            auto& s=styles[block->style];block->shader->setParameter("lineColor",s.color);block->shader->setParameter("lineWidth",s.width);
         }resources->styleRevision=styleVersion;}
         MGlobal::executePythonCommand("import reatoon.viewport as v; v._retained_probe_ready=True",false,false);
     }
@@ -268,7 +289,7 @@ public:
 };
 static const MString classification("drawdb/subscene/reaToonViewport"),registrant("ReaPencilRetainedGPU");
 MStatus initializePlugin(MObject obj){
-    MFnPlugin fn(obj,"ReaPencil independent project","0.8.7","Any");
+    MFnPlugin fn(obj,"ReaPencil independent project","0.8.8","Any");
     return MDrawRegistry::registerSubSceneOverrideCreator(classification,registrant,Draw::create);
 }
 MStatus uninitializePlugin(MObject){

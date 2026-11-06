@@ -44,7 +44,9 @@ class GPUScene:
         polygon_vertices, polygon_ranges = [], []
         outline_indices, diagonal_pairs, diagonal_faces, diagonal_owners = [], [], [], []
         topology_start=time.perf_counter()
-        prepared=[prepare(mesh) for mesh in meshes]
+        prepared=[mesh.get('_gpu_topology') or prepare(mesh) for mesh in meshes]
+        for mesh,p in zip(meshes,prepared):
+            if mesh.get('_retain_topology'):mesh['_gpu_topology']=p
         polygon_edge_count=sum(len(p['pairs']) for p in prepared)
         pair_offset=diagonal_offset=0
         face_offset = edge_offset = vertex_cursor = 0

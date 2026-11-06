@@ -11,12 +11,23 @@ class UnsupportedRetained(ValueError):
     """Use the complete legacy GPU viewport for this topology or style."""
 
 
-def candidates(mesh,face_styles,styles,selected_edges=None):
-    p=prepare(mesh);v=np.asarray(mesh['vertices'],np.float64)
+def candidates(mesh,face_styles,styles,selected_edges=None,cache=None):
+    if cache is not None and 'evaluate' in cache and 'template' in cache:
+        data=cache['template'];cache['evaluate'](mesh,data)
+        return data
+    p=cache.get('topology',mesh.get('_gpu_topology')) if cache is not None else None
+    if p is None:
+        p=prepare(mesh)
+        if cache is not None:cache['topology']=p
+    v=np.asarray(mesh['vertices'],np.float64)
     n=len(p['pairs']);pairs=np.concatenate((p['pairs'],p['diagonal_pairs']))
-    locations=p['outline_indices'].reshape(-1)
-    order=np.argsort(locations,kind='stable');ids=locations[order]
-    starts=np.searchsorted(ids,np.arange(len(pairs)));ends=np.searchsorted(ids,np.arange(len(pairs)),side='right')
+    incidence=p.get('retained_incidence')
+    if incidence is None:
+        locations=p['outline_indices'].reshape(-1)
+        order=np.argsort(locations,kind='stable');ids=locations[order]
+        starts=np.searchsorted(ids,np.arange(len(pairs)));ends=np.searchsorted(ids,np.arange(len(pairs)),side='right')
+        incidence=p['retained_incidence']=(order,starts,ends)
+    order,starts,ends=incidence
     counts=ends-starts
     # Non-manifold adjacency is handled explicitly by the existing GPU path;
     # never silently treat an arbitrary number of incident faces as two faces.
@@ -58,6 +69,17 @@ def candidates(mesh,face_styles,styles,selected_edges=None):
         crease=np.r_[np.cos(np.radians([s.get('crease_angle',45.) for s in styles])),1.]
         static[:n]|=np.where((p['counts']>1)&(minimum<crease[own]-1e-8),enabled[:n]&8,0)
     dynamic=((enabled&4)!=0)&np.r_[p['counts']>1,np.ones(len(p['diagonal_pairs']),bool)]
+    if cache is not None and 'evaluate' in cache and not any(s.get('crease') for s in styles):
+        keep=(owners>=0)&((static!=0)|dynamic)
+        triangles=np.full((len(pairs),6),-1,np.int32)
+        present=counts>0;triangles[present,:3]=tri[order[starts[present]]//3]
+        present=counts>1;triangles[present,3:]=tri[order[ends[present]-1]//3]
+        size=int(keep.sum())
+        data=dict(points=np.empty((size,2,3),np.float64),parameters=np.zeros((size,2,4),np.float32),
+            topology=np.ascontiguousarray(np.c_[pairs,triangles][keep],np.int32),owners=owners[keep],dynamic=(static[keep]==0),static_flags=static[keep],edge_ids=np.flatnonzero(keep))
+        data['normal0']=data['parameters'][:,0,:3];data['normal1']=data['parameters'][:,1,:3]
+        cache['template']=data;cache['evaluate'](mesh,data)
+        return data
     # Identical shader normals can never have opposite facing, for any camera.
     # Remove these provably inactive diagonals instead of uploading them every frame.
     dynamic &= np.any(plane0.astype(np.float32)!=plane1.astype(np.float32),axis=1)

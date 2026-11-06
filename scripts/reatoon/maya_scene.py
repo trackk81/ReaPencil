@@ -319,7 +319,7 @@ def _line_membership(path, line_sets):
     return chosen, edges
 
 
-def export_scene(camera=None, settings=None, camera_override=None, include_normals=True, geometry_purpose="render", include_materials=True, as_arrays=False, mesh_filter=None):
+def export_scene(camera=None, settings=None, camera_override=None, include_normals=True, geometry_purpose="render", include_materials=True, as_arrays=False, mesh_filter=None, geometry_cache=None):
     from . import line_graph
     from . import smooth_geometry
     from . import alpha_boundary
@@ -359,7 +359,9 @@ def export_scene(camera=None, settings=None, camera_override=None, include_norma
         source_fn = om.MFnMesh(path)
         alpha_config=alpha_boundary.configuration(name)
         evaluated=None
-        if as_arrays and not need_edge_provenance and not include_normals and not alpha_config:
+        cached=(geometry_cache or {}).get(name) if geometry_purpose=='viewport' and as_arrays and not need_edge_provenance and not alpha_config else None
+        if cached is not None:evaluated=cached['geometry']
+        if evaluated is None and as_arrays and not need_edge_provenance and not include_normals and not alpha_config:
             from . import native_mesh
             try:
                 evaluated=native_mesh.evaluate(path,smooth_geometry.level(path,settings['enabled_smooth_mesh'],geometry_purpose),purpose=geometry_purpose)
@@ -413,6 +415,9 @@ def export_scene(camera=None, settings=None, camera_override=None, include_norma
                 "smooth_level": evaluated["level"], "geometry_purpose": geometry_purpose,
                 "base_face_count": evaluated["base_face_count"], "base_vertex_count": evaluated["base_vertex_count"],
                 "base_edge_count": evaluated["base_edge_count"]}
+        if geometry_purpose=='viewport' and fn is None:
+            mesh['_native_evaluated']=evaluated
+            if cached is not None and cached.get('topology') is not None:mesh['_gpu_topology']=cached['topology']
         if evaluated["level"]:
             mesh["base_face_ids"] = evaluated["base_face_ids"]
             mesh["base_edge_children"] = evaluated["base_edge_children"]

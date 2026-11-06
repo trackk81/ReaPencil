@@ -57,6 +57,8 @@ _gpu_style_dirty=False
 _graph_mode=False
 _retained_native=False
 _view_mesh_filter=None
+_geometry_dirty_objects=set()
+_smooth_rebuild_only=False
 
 
 def request_refresh(graph_changed=False,style_changed=False):
@@ -79,10 +81,13 @@ def request_refresh(graph_changed=False,style_changed=False):
 def _invalidate(*_):
     global _generation
     _generation += 1
+    if _ and isinstance(_[0],om.MObject):
+        _geometry_dirty_objects.add(om.MObjectHandle(_[0]).hashCode())
 
 
 def _scene_changed(*_):
-    global _watchers_stale, _gpu_rebuild, _gpu_graph_dirty
+    global _watchers_stale, _gpu_rebuild, _gpu_graph_dirty,_smooth_rebuild_only
+    _smooth_rebuild_only=False
     _watchers_stale = True
     _gpu_rebuild = True
     _gpu_graph_dirty = True
@@ -107,13 +112,13 @@ def _node_changed(node,*_):
 
 
 def _attribute_changed(message, *args):
-    global _gpu_rebuild, _gpu_graph_dirty
+    global _gpu_rebuild, _gpu_graph_dirty,_smooth_rebuild_only
     flags = (om.MNodeMessage.kAttributeSet | om.MNodeMessage.kConnectionMade |
              om.MNodeMessage.kConnectionBroken | om.MNodeMessage.kAttributeArrayAdded |
              om.MNodeMessage.kAttributeArrayRemoved | om.MNodeMessage.kAttributeAdded |
              om.MNodeMessage.kAttributeRemoved)
     if message & flags:
-        _invalidate()
+        _invalidate(args[0].node() if args else None)
         if args:
             plug=args[0]
             name=plug.partialName(useLongNames=True)
@@ -124,11 +129,14 @@ def _attribute_changed(message, *args):
                 _gpu_graph_dirty=True
                 request_refresh(graph_changed=True)
             if kind=='shadingEngine' or (kind=='objectSet' and cmds.attributeQuery('reaToonKind',node=om.MFnDependencyNode(plug.node()).name(),exists=True)):
-                _gpu_rebuild=True
+                _gpu_rebuild=True;_smooth_rebuild_only=False
             if name in ('reaPencilAlphaBoundary','uvSet','uvPivot','visibility','intermediateObject','edgeSmoothing','enabledSmoothMesh',
                         'displaySmoothMesh','smoothLevel','renderSmoothLevel','useSmoothPreviewForRender',
                         'smoothDrawType','useGlobalSmoothDrawType','boundaryRule','keepHardEdge',
                         'keepBorder','propagateEdgeHardness','keepMapBorders','smoothUVs') or name.startswith(('osd','uvSet')):
+                smooth_change=name in ('displaySmoothMesh','smoothLevel','renderSmoothLevel','useSmoothPreviewForRender','smoothDrawType','useGlobalSmoothDrawType','boundaryRule','keepHardEdge','keepBorder','propagateEdgeHardness','keepMapBorders','smoothUVs') or name.startswith('osd')
+                if not _gpu_rebuild:_smooth_rebuild_only=smooth_change
+                elif not smooth_change:_smooth_rebuild_only=False
                 _gpu_rebuild=True
                 if name=='reaPencilAlphaBoundary':request_refresh()
 
@@ -136,13 +144,14 @@ def _attribute_changed(message, *args):
 def _targets_changed(*_):
     # Maya set membership edits do not reliably emit attributeChanged.
     # Rebuild material-boundary metadata as well as the per-face target map.
-    global _gpu_rebuild,_gpu_graph_dirty
+    global _gpu_rebuild,_gpu_graph_dirty,_smooth_rebuild_only
     if _:
         try:
             from .view_scope import is_display_set
             if is_display_set(om.MFnDependencyNode(_[0]).name()):return
         except (RuntimeError,TypeError):pass
     _gpu_rebuild=True
+    _smooth_rebuild_only=False
     _gpu_graph_dirty=True
     _invalidate()
 
@@ -661,7 +670,8 @@ def register(plugin_fn):
     global _registered, _native_lib, _native_plugin, _retained_native, DRAW_CLASSIFICATION
     from pathlib import Path
     native_dir=Path(__file__).resolve().parents[2]/'plug-ins'/cmds.about(version=True)
-    retained=native_dir/'reaPencilDraw087.mll'
+    retained=native_dir/'reaPencilDraw088.mll'
+    if not retained.is_file():retained=native_dir/'reaPencilDraw087.mll'
     if not retained.is_file():retained=native_dir/'reaPencilDraw084.mll'
     native_enabled=(os.environ.get('REVTOON_VIEWPORT_BACKEND','gpu')!='cpu' and os.environ.get('REVTOON_NATIVE_DRAW','1')!='0')
     _retained_native=bool(native_enabled and retained.is_file() and os.environ.get('REAPENCIL_RETAINED_VIEWPORT','1')!='0')
@@ -674,8 +684,9 @@ def register(plugin_fn):
         if (native.is_file() and os.environ.get('REVTOON_VIEWPORT_BACKEND','gpu')!='cpu'
                 and os.environ.get('REVTOON_NATIVE_DRAW','1')!='0'):
             import ctypes as c
-            if native.stem=='reaPencilDraw087':
-                for previous in ('reaPencilDraw084',):
+            if native.stem in ('reaPencilDraw087','reaPencilDraw088'):
+                for previous in ('reaPencilDraw084','reaPencilDraw087'):
+                    if previous==native.stem:continue
                     if cmds.pluginInfo(previous,q=True,registered=True) and cmds.pluginInfo(previous,q=True,loaded=True):
                         if not cmds.pluginInfo(previous,q=True,unloadOk=True):raise RuntimeError('Restart Maya to update the GPU viewport module.')
                         if cmds.pluginInfo(previous,q=True,autoload=True):

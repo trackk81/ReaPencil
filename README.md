@@ -23,7 +23,7 @@ import reapencil_start
 reapencil_start.launch()
 ```
 
-Plug-in Manager의 기본 파일은 **reaPencil.py**입니다. Maya가 허용 여부를 물으면 설치한 파일과 경로를 직접 확인하세요. GPU 화면 표시용 **reaPencilDraw087.mll**은 메인 플러그인이 자동으로 불러오는 보조 모듈입니다.
+Plug-in Manager의 기본 파일은 **reaPencil.py**입니다. Maya가 허용 여부를 물으면 설치한 파일과 경로를 직접 확인하세요. GPU 화면 표시용 **reaPencilDraw088.mll**은 메인 플러그인이 자동으로 불러오는 보조 모듈입니다.
 
 ## 이후 업데이트
 

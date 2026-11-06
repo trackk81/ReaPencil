@@ -22,7 +22,7 @@ def prepare():
     entries.extend(ROOT/p for p in ['native/viewport_retained.cpp','native/viewport_draw.cpp','native/render_view.cpp','native/mesh_export.cpp',
         'tools/install.py','tools/package_portable.py','tools/publish_github.py','tools/build_native.ps1','tools/build_mesh_native.ps1','tools/build_image_native.ps1',
         'distribution/README_PUBLIC.md','distribution/INSTALL_KO.md','distribution/INSTALL.cmd','distribution/CHECK.cmd','distribution/SETUP.py','distribution/CHECK.py',
-        'docs/updates.md','docs/release_085.md','docs/release_086.md','docs/release_087.md','tests/test_updates.py','tests/test_view_scope.py','tests/test_retained_geometry.py'])
+        'docs/updates.md','docs/release_085.md','docs/release_086.md','docs/release_087.md','docs/release_088.md','tests/test_updates.py','tests/test_view_scope.py','tests/test_retained_geometry.py'])
     expected=set()
     # Large unchanged upstream wheels are release assets, not Git history.
     for wheel in (ROOT/'distribution/wheels').glob('*.whl'):entries.append(wheel)
@@ -81,7 +81,7 @@ def publish(stage,notes):
     import ast
     tree=ast.parse((ROOT/'scripts/reatoon/__init__.py').read_text(encoding='utf-8'))
     version=next(ast.literal_eval(n.value) for n in tree.body if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='__version__' for t in n.targets))
-    if git('diff','--cached','--name-only'):git('commit','-m','ReaPencil '+version+': viewport depth and per-panel isolate fixes')
+    if git('diff','--cached','--name-only'):git('commit','-m','ReaPencil '+version+': incremental viewport geometry and smooth-change caching')
     git('push','-u','origin','main');head=git('rev-parse','HEAD')
     prefix='/repos/'+REPO;tag='v'+version
     try:release=api(prefix+'/releases/tags/'+tag)

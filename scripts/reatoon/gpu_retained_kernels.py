@@ -6,7 +6,11 @@ def payload(source,name,end):
     k=source[source.index('__kernel void '+name+'('):source.index(end,source.index('__kernel void '+name+'('))]
     k=k.replace('void '+name+'(', 'void retained_'+name+'(',1)
     brace=k.index('{');signature=k[:brace].rstrip()
-    k=signature[:-1]+',__global float4 *outplanes) '+k[brace:]
+    k=signature[:-1]+',__global float4 *outplanes,int pair_first) '+k[brace:]
+    k=k.replace('pairs[work]', 'pairs[work+pair_first]')
+    if name=='intersections':
+        k=k.replace('int i=pairs[work+pair_first].x,j=pairs[work+pair_first].y;',
+                    'int2 pair=pairs[work+pair_first];int i=min(pair.x,pair.y),j=max(pair.x,pair.y);')
     marker='output_mesh_pair[index]'
     start=k.index(marker);stop=k.index(';',start)+1
     k=k[:stop]+'\n        outplanes[2*index]=convert_float4((double4)(na,output_mesh_pair[index].x));outplanes[2*index+1]=convert_float4((double4)(nb,output_mesh_pair[index].y));'+k[stop:]

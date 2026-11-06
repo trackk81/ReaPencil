@@ -4,6 +4,29 @@ from reatoon.retained_geometry import candidates,camera_mask
 from reatoon.gpu_geometry import GPUScene
 
 class RetainedGeometryTests(unittest.TestCase):
+    def test_incremental_paged_contacts_match_full_recompute(self):
+        import copy
+        from reatoon.gpu_paged import PagedGPUScene
+        meshes=[]
+        for x in (0,5,10):
+            meshes.extend([dict(vertices=np.array([[-2,-2,0],[2,-2,0],[0,2,0]],float)+[x,0,0],faces=[[0,1,2]],triangles=[[0,1,2]],triangle_faces=[0]),
+                           dict(vertices=np.array([[0,-1,-1],[0,1,-1],[0,0,1]],float)+[x,0,0],faces=[[0,1,2]],triangles=[[0,1,2]],triangle_faces=[0])])
+        gpu=PagedGPUScene(copy.deepcopy(meshes),retain_planes=True)
+        styles=[dict(intersections=True)];faces=[np.zeros(1,np.int32) for _ in meshes]
+        def canonical(p):return sorted(tuple(sorted(tuple(np.round(v[:3],8)) for v in pair)) for pair in p.reshape(-1,2,4))
+        try:
+            gpu.configure_face_styles(faces,1);original=gpu.intersections(styles)[0];self.assertEqual(len(original),6)
+            for step in (6.,1.,0.):
+                changed=copy.deepcopy(meshes);changed[1]['vertices'][:,0]+=step
+                gpu.update(np.concatenate([m['vertices'] for m in changed]),changed_meshes=[1]);gpu.configure_face_styles(faces,1)
+                actual=gpu.intersections(styles)[0]
+                fresh=PagedGPUScene(changed,retain_planes=True)
+                try:
+                    fresh.configure_face_styles(faces,1);expected=fresh.intersections(styles)[0]
+                    self.assertEqual(canonical(actual),canonical(expected))
+                finally:fresh.close()
+        finally:gpu.close()
+
     def test_maya_degenerate_polygon_with_no_triangles(self):
         mesh=dict(vertices=[[0,0,0],[1,0,0],[0,1,0],[2,0,0]],faces=[[0,1,2],[0,3,1]],
                   triangles=[[0,1,2]],triangle_faces=[0])

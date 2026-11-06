@@ -26,6 +26,10 @@ def bind(lib):
     lib.rt_begin_pass.argtypes=[];lib.rt_begin_pass.restype=None
     lib.rt_style.argtypes=[c.c_uint,c.c_float,c.POINTER(c.c_float)];lib.rt_style.restype=None
     lib.rt_mode.argtypes=[c.c_int];lib.rt_mode.restype=None
+    if hasattr(lib,'rt_reuse'):
+        lib.rt_reuse.argtypes=[c.c_uint,c.c_uint];lib.rt_reuse.restype=None
+        lib.rt_group_count.argtypes=[];lib.rt_group_count.restype=c.c_uint
+        lib.rt_edge_positions.argtypes=[c.c_void_p,c.c_void_p,c.c_uint,c.c_void_p,c.c_void_p];lib.rt_edge_positions.restype=None
     lib.rt_add.argtypes=[c.c_void_p,c.c_uint,c.c_float,c.POINTER(c.c_float),c.c_int,c.POINTER(c.c_float),c.c_int]
     lib.rt_add.restype=c.c_int
     lib.rt_effect(str(Path(__file__).parent/'shaders/retained_lines.ogsfx').encode('utf-8'))
@@ -33,6 +37,10 @@ def bind(lib):
         lib.rt_scope.argtypes=[c.c_char_p,c.c_void_p,c.c_uint];lib.rt_scope.restype=None
         from . import view_scope
         view_scope.reset()
+
+def _evaluate_edges(mesh,data):
+    v=np.ascontiguousarray(mesh['vertices'],np.float64)
+    _library.rt_edge_positions(v.ctypes.data,data['topology'].ctypes.data,len(data['owners']),data['points'].ctypes.data,data['parameters'].ctypes.data)
 
 def _switch(mode):
     global _mode,_key,_passes,_geometry_style_key
@@ -90,10 +98,12 @@ def _prepare(camera_name,aspect):
     settings=maya_scene.load_settings()
     rebuilt=vp._gpu_scene is None or vp._gpu_rebuild
     if rebuilt:
+        geometry_cache=(vp._gpu_scene.smooth_rebuild_cache() if vp._smooth_rebuild_only and vp._gpu_scene is not None and not vp._gpu_scene.empty else None)
         if vp._gpu_scene is not None:vp._gpu_scene.close()
-        vp._gpu_scene=LiveScene(path,settings,camera,retained=True)
+        vp._gpu_scene=LiveScene(path,settings,camera,retained=True,geometry_cache=geometry_cache)
         vp._gpu_scene.generation=vp._generation;_passes=None
         vp._gpu_rebuild=False;vp._gpu_graph_dirty=False
+        vp._smooth_rebuild_only=False
     live=vp._gpu_scene
     changed=False
     if not live.empty and live.generation!=vp._generation:
@@ -131,14 +141,18 @@ def _prepare(camera_name,aspect):
         vp._last_report.update(geometry_generation=vp._generation,geometry_updated=False,retained_geometry_reused=True,
                               prepare_ms=(time.perf_counter()-started)*1000)
         return
+    partial=hasattr(_library,'rt_reuse') and len(live.scene['meshes'])<=256
+    dirty=set(getattr(live,'changed_meshes',[]))
+    reuse=partial and changed and not rebuilt and not graph_dirty and geometry_style_key==_geometry_style_key
     _library.rt_begin();total=0;edge_total=0;cross_total=0;batch_count=0;pass_reports=[]
     def submit(points,parameters,styles,owners):
         nonlocal total,batch_count
-        for owner in np.unique(owners):
+        unique=np.unique(owners)
+        for owner in unique:
             style=styles[int(owner)]
             selected=owners==owner
-            p=np.ascontiguousarray(points[selected],np.float64)
-            q=np.ascontiguousarray(parameters[selected],np.float32)
+            p=np.ascontiguousarray(points if len(unique)==1 else points[selected],np.float64)
+            q=np.ascontiguousarray(parameters if len(unique)==1 else parameters[selected],np.float32)
             color=(c.c_float*3)(*style.get('line_color',[.04,.04,.07]))
             _library.rt_style(item['retained_style_offset']+int(owner),float(style.get('line_width',1.5)),color)
             if not _library.rt_add_retained(c.c_void_p(p.ctypes.data),c.c_void_p(q.ctypes.data),len(p),float(style.get('line_width',1.5)),color):
@@ -155,17 +169,29 @@ def _prepare(camera_name,aspect):
             parameters=gpu.cross_planes.copy();parameters[:,:,3]=(parameters[:,:,3]+1)*2
             submit(cross.reshape(-1,2,4)[:,:,:3],parameters,styles,owners)
             cross_total+=len(owners);pass_reports.append(report)
+            if not reuse:item['edge_cache']={};item['edge_ranges']={}
             for i,mesh in enumerate(live.scene['meshes']):
                 faces=item['face_style_ids'][i];selected=item.get('selected_edges')
                 selected=None if selected is None else selected[i]
                 if not np.any(faces>=0) and not selected:continue
-                try:data=retained_geometry.candidates(mesh,faces,styles,selected)
+                if partial:
+                    _library.rt_begin_pass();first=_library.rt_group_count()
+                    if reuse and i not in dirty and i in item['edge_ranges']:
+                        old,count,segments=item['edge_ranges'][i];_library.rt_reuse(old,count)
+                        item['edge_ranges'][i]=(first,count,segments);total+=segments;edge_total+=segments
+                        continue
+                cache=item['edge_cache'].setdefault(i,{}) if partial else None
+                if cache is not None:cache['evaluate']=_evaluate_edges
+                try:data=retained_geometry.candidates(mesh,faces,styles,selected,cache=cache)
                 except retained_geometry.UnsupportedRetained as error:
                     raise retained_geometry.UnsupportedRetained(mesh['name']+': '+str(error)) from error
-                parameters=np.zeros((len(data['owners']),2,4),np.float32)
-                parameters[:,0,:3]=data['normal0'];parameters[:,1,:3]=data['normal1']
+                parameters=data.get('parameters')
+                if parameters is None:
+                    parameters=np.zeros((len(data['owners']),2,4),np.float32)
+                    parameters[:,0,:3]=data['normal0'];parameters[:,1,:3]=data['normal1']
                 parameters[:,0,3]=2*(i+1)+data['dynamic'];parameters[:,1,3]=2*(i+1)
                 submit(data['points'],parameters,styles,data['owners']);edge_total+=len(data['owners'])
+                if partial:item['edge_ranges'][i]=(first,_library.rt_group_count()-first,len(data['owners']))
     _library.rt_end()
     _geometry_style_key=geometry_style_key
     _key=(vp._generation,vp._gpu_rebuild,vp._gpu_graph_dirty,vp._gpu_style_dirty)
