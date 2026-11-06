@@ -1,0 +1,22 @@
+// Independent Attribute Editor bridge for ReaPencil Line nodes.
+global proc revToonLineAECreate(string $plug)
+{
+    python("from reatoon import line_editor; line_editor.ae_create(\"" + encodeString($plug) + "\")");
+}
+global proc revToonLineAEReplace(string $plug)
+{
+    python("from reatoon import line_editor; line_editor.ae_replace(\"" + encodeString($plug) + "\")");
+}
+global proc AErevToonLineTemplate(string $nodeName)
+{
+    editorTemplate -beginScrollLayout;
+    editorTemplate -beginLayout "ReaPencil Line Parameters" -collapse 0;
+    editorTemplate -callCustom "revToonLineAECreate" "revToonLineAEReplace" "overrides";
+    editorTemplate -endLayout;
+    editorTemplate -suppress "active";
+    editorTemplate -suppress "renderPriority";
+    editorTemplate -suppress "lineSets";
+    editorTemplate -suppress "outputToRE";
+    editorTemplate -addExtraControls;
+    editorTemplate -endScrollLayout;
+}

@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.log
+dist/
+validation/
+outputs/
+distribution/wheels/

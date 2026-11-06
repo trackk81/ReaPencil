@@ -1,0 +1,12 @@
+global proc revToonSettingsCreate(string $plug) { python("from reatoon import line_aux_ui; line_aux_ui.settings_create(\"" + encodeString($plug) + "\")"); }
+global proc revToonSettingsReplace(string $plug) { python("from reatoon import line_aux_ui; line_aux_ui.settings_replace(\"" + encodeString($plug) + "\")"); }
+global proc AErevToonRenderSettingsTemplate(string $nodeName)
+{
+    editorTemplate -beginScrollLayout;
+    editorTemplate -beginLayout "ReaPencil Render Settings" -collapse 0;
+    editorTemplate -callCustom "revToonSettingsCreate" "revToonSettingsReplace" "reaToonSettingsJson";
+    editorTemplate -endLayout;
+    editorTemplate -suppress "enabledSmoothMesh";
+    editorTemplate -addExtraControls;
+    editorTemplate -endScrollLayout;
+}

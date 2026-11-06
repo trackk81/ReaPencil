@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE renderer SYSTEM "renderer.dtd">
+<renderer desc="ReaPencil CPU cel and line renderer (PNG, SVG, EPS)">
+  <melheader s='loadPlugin -quiet "reaToon.py"; python("import reatoon.render_integration; reatoon.render_integration.register()");'/>
+  <meltrailer s='python("reatoon.render_integration.command_render()");'/>
+  <sep desc="ReaPencil / 레아펜슬. Outputs PNG passes plus SVG/EPS. Current render layer only."/>
+  <mel n="rd" p="1" t="path" s='workspace -fileRule "images" "%1";' h="Output images directory"/>
+  <attrString n="im" s="defaultRenderGlobals.imageFilePrefix" t="string" h="Image prefix; supports Scene, Camera, Layer tokens"/>
+  <mel n="s" p="1" t="float" s='setAttr defaultRenderGlobals.animation 1; setAttr defaultRenderGlobals.startFrame %1;' h="First frame"/>
+  <mel n="e" p="1" t="float" s='setAttr defaultRenderGlobals.animation 1; setAttr defaultRenderGlobals.endFrame %1;' h="Last frame"/>
+  <attr n="b" s="defaultRenderGlobals.byFrameStep" t="float" h="Positive frame step"/>
+  <mel n="cam" p="1" t="string" s='makeCameraRenderable("%1");' h="Renderable camera"/>
+  <attr n="x" s="defaultResolution.width" t="int" h="Image width"/>
+  <attr n="y" s="defaultResolution.height" t="int" h="Image height"/>
+  <attr n="pad" s="defaultRenderGlobals.extensionPadding" t="int" h="Frame number padding"/>
+  <attr n="skipExistingFrames" s="defaultRenderGlobals.skipExistingFrames" t="boolean" h="Skip a frame only when every output pass exists"/>
+</renderer>
+

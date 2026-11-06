@@ -1,0 +1,93 @@
+#version 410
+// Independent retained line shader. All silhouette tests use the current view.
+uniform mat4 viewProjection : WorldViewProjection;
+uniform mat4 planeMatrix;
+uniform vec2 viewportSize : ViewportPixelSize;
+uniform vec4 eyeVector;
+uniform vec4 lineColor = {0,0,0,1};
+uniform float lineWidth = 1.5;
+
+attribute APPDATA {
+    vec3 inPosition : POSITION;
+    vec4 normalA : TEXCOORD0;
+};
+attribute VERTEXDATA {
+    vec3 worldPosition;
+    vec3 faceA;
+    float active;
+    float dynamic;
+};
+attribute FRAGMENTDATA {
+    vec4 planeA;
+    vec4 planeB;
+    vec2 strip;
+};
+attribute PIXELDATA { vec4 outColor : COLOR0; };
+
+GLSLShader RTVertex {
+    void main() {
+        vec3 sight=eyeVector.xyz-inPosition*eyeVector.w;
+        bool a=dot(normalA.xyz,sight)>0.0;
+        VS_OUT.active=a?1.0:0.0;
+        VS_OUT.dynamic=normalA.w;
+        VS_OUT.worldPosition=inPosition;
+        VS_OUT.faceA=normalA.xyz;
+        gl_Position=viewProjection*vec4(inPosition,1);
+    }
+}
+GLSLShader RTGeometry {
+    layout(lines) in;
+    layout(triangle_strip,max_vertices=4) out;
+    bool clipPlane(float a,float b,inout float low,inout float high) {
+        if(a<0.0 && b<0.0)return false;
+        if(a<0.0)low=max(low,a/(a-b));
+        else if(b<0.0)high=min(high,a/(a-b));
+        return low<=high;
+    }
+    void main() {
+        if(lineWidth<=0.0)return;
+        if(GS_IN[0].dynamic>0.5 && GS_IN[0].active==GS_IN[1].active)return;
+        vec4 a=gl_in[0].gl_Position,b=gl_in[1].gl_Position;
+        float low=0.0,high=1.0;
+        float mx=1.0+(lineWidth+2.0)/viewportSize.x,my=1.0+(lineWidth+2.0)/viewportSize.y;
+        if(!clipPlane(a.w+a.z,b.w+b.z,low,high)||!clipPlane(a.w-a.z,b.w-b.z,low,high))return;
+        if(!clipPlane(a.w*mx+a.x,b.w*mx+b.x,low,high)||!clipPlane(a.w*mx-a.x,b.w*mx-b.x,low,high))return;
+        if(!clipPlane(a.w*my+a.y,b.w*my+b.y,low,high)||!clipPlane(a.w*my-a.y,b.w*my-b.y,low,high))return;
+        vec4 first=mix(a,b,low),last=mix(a,b,high);
+        if(first.w<=1e-12 || last.w<=1e-12)return;
+        vec2 delta=(last.xy/last.w-first.xy/first.w)*viewportSize;
+        if(dot(delta,delta)<1e-12)return;
+        vec2 side=normalize(vec2(-delta.y,delta.x))*(lineWidth+1.0)/viewportSize;
+        vec4 pa=planeMatrix*vec4(GS_IN[0].faceA,-dot(GS_IN[0].faceA,GS_IN[0].worldPosition));
+        vec4 pb=planeMatrix*vec4(GS_IN[1].faceA,-dot(GS_IN[1].faceA,GS_IN[0].worldPosition));
+        for(int i=0;i<4;i++) {
+            vec4 p=i<2?first:last;float sign=(i%2)==0?1.0:-1.0;
+            p.xy+=side*p.w*sign;
+            gl_Position=p;GS_OUT.planeA=pa;GS_OUT.planeB=pb;
+            GS_OUT.strip=vec2(sign*(lineWidth+1.0)*.5,0.0);EmitVertex();
+        }
+        EndPrimitive();
+    }
+}
+GLSLShader RTPixel {
+    float surfaceDepth(vec4 plane,vec2 xy,float fallback) {
+        if(abs(plane.z)<1e-7)return fallback;
+        float z=-(dot(plane.xy,xy)+plane.w)/plane.z*.5+.5;
+        return (z>=0.0 && z<=1.0)?z:fallback;
+    }
+    void main() {
+        float coverage=clamp((lineWidth+1.0)*.5-abs(PS_IN.strip.x),0.0,1.0);
+        if(coverage<=0.0)discard;
+        vec2 xy=gl_FragCoord.xy/viewportSize*2.0-1.0;
+        float z=min(surfaceDepth(PS_IN.planeA,xy,gl_FragCoord.z),surfaceDepth(PS_IN.planeB,xy,gl_FragCoord.z));
+        gl_FragDepth=z>0.0?uintBitsToFloat(floatBitsToUint(z)-1u):z;
+        outColor=vec4(lineColor.rgb,lineColor.a*coverage);
+    }
+}
+technique Main {
+    pass P0 {
+        VertexShader(in APPDATA,out VERTEXDATA VS_OUT)=RTVertex;
+        GeometryShader(in VERTEXDATA GS_IN,out FRAGMENTDATA GS_OUT)=RTGeometry;
+        PixelShader(in FRAGMENTDATA PS_IN,out PIXELDATA)=RTPixel;
+    }
+}

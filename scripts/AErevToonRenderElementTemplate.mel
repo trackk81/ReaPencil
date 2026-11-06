@@ -1,0 +1,11 @@
+global proc revToonElementCreate(string $plug) { python("from reatoon import line_aux_ui; line_aux_ui.element_create(\"" + encodeString($plug) + "\")"); }
+global proc revToonElementReplace(string $plug) { python("from reatoon import line_aux_ui; line_aux_ui.element_replace(\"" + encodeString($plug) + "\")"); }
+global proc AErevToonRenderElementTemplate(string $nodeName)
+{
+    editorTemplate -beginScrollLayout;
+    editorTemplate -beginLayout "ReaPencil Render Element" -collapse 0;
+    editorTemplate -callCustom "revToonElementCreate" "revToonElementReplace" "elementJson";
+    editorTemplate -endLayout;
+    editorTemplate -addExtraControls;
+    editorTemplate -endScrollLayout;
+}
