@@ -46,6 +46,9 @@ def install(modules_dir=None, install_dir=None):
         target = destination / relative
         payloads.append((target,source.read_bytes()))
         copied.append(relative.as_posix())
+    # Retired pre-release entry points: back up and remove transactionally.
+    for name in ('plug-ins/reaToon.py','scripts/revtoon_start.py','scripts/reatoon/plugin_migration.py'):
+        if (destination/name).is_file():payloads.append((destination/name,None))
     tree=ast.parse((ROOT/'scripts/reatoon/__init__.py').read_text(encoding='utf-8'))
     version=next(ast.literal_eval(n.value) for n in tree.body if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='__version__' for t in n.targets))
     target_module = modules / 'ReaToon.mod'
@@ -59,16 +62,21 @@ def install(modules_dir=None, install_dir=None):
     staged=[];applied=[]
     try:
         for index,(target,data) in enumerate(payloads):
-            if target.exists() and target.read_bytes()==data:continue
+            if data is None and not target.exists():continue
+            if data is not None and target.exists() and target.read_bytes()==data:continue
             backup=None
             if target.exists():
                 backup=backup_root/(str(index)+'-'+target.name)
                 backup.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(target,backup)
             target.parent.mkdir(parents=True,exist_ok=True)
-            temp=target.with_name(target.name+'.'+uuid.uuid4().hex+'.tmp');temp.write_bytes(data)
+            temp=None
+            if data is not None:
+                temp=target.with_name(target.name+'.'+uuid.uuid4().hex+'.tmp');temp.write_bytes(data)
             staged.append((target,temp,backup))
         for target,temp,backup in staged:
-            os.replace(temp,target);applied.append((target,backup))
+            if temp is None:target.unlink()
+            else:os.replace(temp,target)
+            applied.append((target,backup))
     except Exception:
         errors=[]
         for target,backup in reversed(applied):
@@ -80,7 +88,8 @@ def install(modules_dir=None, install_dir=None):
         if errors:raise RuntimeError('Install rollback needs recovery from '+str(backup_root)+': '+'; '.join(errors))
         raise
     finally:
-        for _,temp,_ in staged:temp.unlink(missing_ok=True)
+        for _,temp,_ in staged:
+            if temp is not None:temp.unlink(missing_ok=True)
     print('Installed:', destination)
     print('Registered module:', target_module)
     print('In Maya Python: import reapencil_start; reapencil_start.launch()')

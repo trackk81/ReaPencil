@@ -14,13 +14,15 @@ REPO='trackk81/ReaPencil'
 
 def prepare():
     stage=ROOT/'validation/github_public_source';stage.mkdir(parents=True,exist_ok=True)
+    for name in ('plug-ins/reaToon.py','scripts/revtoon_start.py','scripts/reatoon/plugin_migration.py'):
+        (stage/name).unlink(missing_ok=True)
     entries=[]
     for folder in ('scripts','plug-ins','rendererDesc'):
         entries.extend(p for p in (ROOT/folder).rglob('*') if p.is_file() and p.suffix in ('.py','.mel','.mll','.ogsfx','.xml') and '__pycache__' not in p.parts)
     entries.extend(ROOT/p for p in ['native/viewport_retained.cpp','native/viewport_draw.cpp','native/render_view.cpp','native/mesh_export.cpp',
         'tools/install.py','tools/package_portable.py','tools/publish_github.py','tools/build_native.ps1','tools/build_mesh_native.ps1','tools/build_image_native.ps1',
         'distribution/README_PUBLIC.md','distribution/INSTALL_KO.md','distribution/INSTALL.cmd','distribution/CHECK.cmd','distribution/SETUP.py','distribution/CHECK.py',
-        'docs/updates.md','docs/release_085.md','tests/test_updates.py'])
+        'docs/updates.md','docs/release_085.md','docs/release_086.md','tests/test_updates.py'])
     expected=set()
     # Large unchanged upstream wheels are release assets, not Git history.
     for wheel in (ROOT/'distribution/wheels').glob('*.whl'):entries.append(wheel)

@@ -84,6 +84,10 @@ class UpdateTests(unittest.TestCase):
                 f=source/name;f.parent.mkdir(parents=True,exist_ok=True);f.write_text(data)
             target.mkdir();(target/'reatoon-install.json').write_text('{"version":"0.8.4"}')
             (target/'plug-ins').mkdir();(target/'plug-ins/reaPencil.py').write_text('old entry')
+            (target/'plug-ins/reaToon.py').write_text('retired bridge')
+            (target/'scripts/reatoon').mkdir(parents=True)
+            (target/'scripts/revtoon_start.py').write_text('retired launcher')
+            (target/'scripts/reatoon/plugin_migration.py').write_text('retired migration')
             modules.mkdir();module=modules/'ReaToon.mod';module.write_text('old module')
             original=os.replace
             def fail_once(a,b):
@@ -94,8 +98,12 @@ class UpdateTests(unittest.TestCase):
             self.assertEqual((target/'plug-ins/reaPencil.py').read_text(),'old entry')
             self.assertEqual(json.loads((target/'reatoon-install.json').read_text())['version'],'0.8.4')
             self.assertEqual(module.read_text(),'old module');self.assertFalse((target/'scripts/added.py').exists())
+            self.assertEqual((target/'plug-ins/reaToon.py').read_text(),'retired bridge')
+            self.assertTrue((target/'scripts/revtoon_start.py').is_file())
             with patch.object(mod,'ROOT',source):mod.install(modules,target)
             self.assertEqual(json.loads((target/'reatoon-install.json').read_text())['version'],'0.8.5')
             self.assertEqual((target/'plug-ins/reaPencil.py').read_text(),'new entry')
+            for name in ('plug-ins/reaToon.py','scripts/revtoon_start.py','scripts/reatoon/plugin_migration.py'):
+                self.assertFalse((target/name).exists(),name)
 
 if __name__=='__main__':unittest.main()

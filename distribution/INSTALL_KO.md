@@ -1,4 +1,4 @@
-# ReaPencil 0.8.5 다른 PC 설치 및 테스트
+# ReaPencil 0.8.6 다른 PC 설치 및 테스트
 
 지원 대상: **Windows 64비트 / Maya 2025**. 다른 Maya 버전과 macOS/Linux용 바이너리는 포함하지 않습니다.
 
@@ -13,7 +13,7 @@ import reapencil_start
 reapencil_start.launch()
 ```
 
-플러그인 허용창에서는 `reaPencil.py`와 `reaPencilDraw084.mll` 등 설치한 ReaPencil 파일인지 확인하고 Allow를 선택하세요. 설치기는 Maya 보안 설정을 바꾸지 않습니다. 예전 `reaToon.py`의 Auto load를 켜 둔 경우에만 새 파일로 그 선택을 이전합니다.
+플러그인 허용창에서는 `reaPencil.py`와 `reaPencilDraw084.mll` 등 설치한 ReaPencil 파일인지 확인하고 Allow를 선택하세요. 설치기는 Maya 보안 설정을 바꾸지 않습니다. Auto load는 메인 플러그인 `reaPencil.py`에만 설정하면 됩니다.
 
 Maya를 기본 경로에 설치하지 않았다면 명령 프롬프트에서 실제 mayapy 경로를 지정합니다.
 
@@ -45,7 +45,7 @@ GPU 뷰포트에는 그래픽 드라이버의 **OpenCL 및 fp64(double precision
 
 라이선스 서버·로그인·컴퓨터 인증은 없고 Pencil+ 실행 파일도 포함되지 않습니다. `.ma`와 `.mb`의 저장 데이터로 변환하므로 Pencil+ 설치가 필요하지 않습니다. 저장되지 않은 기본값은 관찰한 Pencil+ 4.2.3 속성 기준으로 복원합니다. 브러시 맵/획 연결, 원본 절차적 평가, 전용 PLD, 모든 버전의 완전 호환은 지원하지 않습니다. 원본 노드가 이미 삭제됐거나 저장 과정에서 데이터가 유실된 파일은 복구할 수 없습니다.
 
-기본 플러그인은 `reaPencil.py`입니다. `reaToon.py`는 기존 장면의 요구 사항을 읽는 작은 호환 연결 파일이며, 실제 노드·명령은 새 플러그인이 등록합니다. 기존 명령과 내부 노드/렌더러 ID는 이어서 사용할 수 있습니다.
+기본 플러그인은 `reaPencil.py`입니다. 배포 전 이름 정리에 따라 `reaToon.py` 호환 연결 파일과 옛 실행 별칭은 제거했습니다. 기존 설치에서 업데이트하면 해당 파일도 백업 후 제거합니다.
 
 ## GitHub 업데이트
 

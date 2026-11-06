@@ -23,7 +23,7 @@ import reapencil_start
 reapencil_start.launch()
 ```
 
-Plug-in Manager의 기본 파일은 **reaPencil.py**입니다. Maya가 허용 여부를 물으면 설치한 파일과 경로를 직접 확인하세요. **reaToon.py**는 이전 장면을 여는 호환 연결 파일입니다. 이전 Auto load 설정이 있으면 새 파일로 이전합니다.
+Plug-in Manager의 기본 파일은 **reaPencil.py**입니다. Maya가 허용 여부를 물으면 설치한 파일과 경로를 직접 확인하세요. GPU 화면 표시용 **reaPencilDraw084.mll**은 메인 플러그인이 자동으로 불러오는 보조 모듈입니다.
 
 ## 이후 업데이트
 
