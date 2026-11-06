@@ -438,6 +438,17 @@ def _add_selected(ctx,kind):
     return targets
 
 
+def _whole_object_paths(names):
+    """Compare transform/shape aliases without treating partial faces as whole objects."""
+    paths=set()
+    for name in names:
+        if '.' in name:continue
+        for path in cmds.ls(name,long=True) or []:
+            if cmds.nodeType(path)=='mesh':paths.update(cmds.listRelatives(path,parent=True,fullPath=True) or [path])
+            else:paths.add(path)
+    return paths
+
+
 def _chooser(ctx, kind):
     target = _selected_set(ctx)
     window = cmds.window(title=tr('Add ' + ('Objects' if kind=='objects' else 'Materials')), widthHeight=(420,440))
@@ -449,7 +460,8 @@ def _chooser(ctx, kind):
         query = cmds.textField(filter_control,query=True,text=True).lower()
         selection = cmds.ls(selection=True,long=True) or []
         if kind == 'shaders':
-            candidates = cmds.ls(materials=True) or []
+            registered = set(graph.get_targets(target)['shaders'])
+            candidates = [n for n in (cmds.ls(materials=True) or []) if n not in registered]
             if cmds.checkBox(selected_only,query=True,value=True):
                 candidates = [n for n in candidates if n in selection]
         elif cmds.checkBox(selected_only,query=True,value=True):
@@ -457,6 +469,9 @@ def _chooser(ctx, kind):
         else:
             candidates = sorted(set((cmds.listRelatives(m,parent=True,fullPath=True) or [m])[0]
                                     for m in cmds.ls(type='mesh',long=True) or []))
+        if kind == 'objects':
+            registered = _whole_object_paths(graph.get_targets(target)['objects'])
+            candidates = [n for n in candidates if not (_whole_object_paths([n]) & registered)]
         cmds.textScrollList(listing,edit=True,removeAll=True)
         candidates = [n for n in candidates if query in n.lower()]
         if candidates:

@@ -1,4 +1,4 @@
-# ReaPencil 0.8.13 다른 PC 설치 및 테스트
+# ReaPencil 0.8.15 다른 PC 설치 및 테스트
 
 지원 대상: **Windows 64비트 / Maya 2025**. 다른 Maya 버전과 macOS/Linux용 바이너리는 포함하지 않습니다.
 
