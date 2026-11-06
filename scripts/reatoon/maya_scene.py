@@ -319,7 +319,7 @@ def _line_membership(path, line_sets):
     return chosen, edges
 
 
-def export_scene(camera=None, settings=None, camera_override=None, include_normals=True, geometry_purpose="render", include_materials=True, as_arrays=False):
+def export_scene(camera=None, settings=None, camera_override=None, include_normals=True, geometry_purpose="render", include_materials=True, as_arrays=False, mesh_filter=None):
     from . import line_graph
     from . import smooth_geometry
     from . import alpha_boundary
@@ -352,6 +352,7 @@ def export_scene(camera=None, settings=None, camera_override=None, include_norma
     elif include_materials:
         warnings.append("No directional light: using the ReaToon preview light.")
     for name in cmds.ls(type="mesh", long=True, allPaths=True) or []:
+        if geometry_purpose=='viewport' and mesh_filter is not None and name not in mesh_filter:continue
         path = _dag(name)
         if cmds.getAttr(name + ".intermediateObject") or not path.isVisible():
             continue
@@ -448,7 +449,7 @@ def export_scene(camera=None, settings=None, camera_override=None, include_norma
     result["merge_groups"] = line_graph.export_merge_groups(result["meshes"])
     result["render_elements"] = render_elements.snapshot()
     result["scene_name"] = os.path.splitext(os.path.basename(cmds.file(query=True, sceneName=True) or "untitled"))[0]
-    if not result["meshes"] and not result.get('alpha_empty'):
+    if not result["meshes"] and not result.get('alpha_empty') and not (geometry_purpose=='viewport' and mesh_filter is not None):
         raise ValueError("No visible polygon meshes to render.")
     return result
 

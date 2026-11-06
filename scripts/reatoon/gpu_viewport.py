@@ -74,7 +74,8 @@ class LiveScene:
         started=time.perf_counter()
         self.scene = maya_scene.export_scene(camera_path.fullPathName(),settings,camera_override=camera,
                                             include_normals=False,geometry_purpose='viewport',
-                                            include_materials=False,as_arrays=True)
+                                            include_materials=False,as_arrays=True,
+                                            mesh_filter=None if retained else camera.get('_viewport_mesh_filter'))
         exported=time.perf_counter()
         self.empty=not self.scene['meshes']
         if self.empty:

@@ -56,6 +56,7 @@ _exiting=False
 _gpu_style_dirty=False
 _graph_mode=False
 _retained_native=False
+_view_mesh_filter=None
 
 
 def request_refresh(graph_changed=False,style_changed=False):
@@ -92,6 +93,12 @@ def _node_changed(node,*_):
     global _watchers_stale,_graph_mode
     try:kind=om.MFnDependencyNode(node).typeName
     except RuntimeError:return _scene_changed()
+    if kind=='objectSet':
+        from .view_scope import is_display_set
+        if is_display_set(om.MFnDependencyNode(node).name()):return
+        _watchers_stale=True
+        request_refresh(graph_changed=True)
+        return
     if kind in ('revToonLine','revToonLineSet','revToonRenderElement'):
         _watchers_stale=True
         if kind=='revToonLine':_graph_mode=True
@@ -130,6 +137,11 @@ def _targets_changed(*_):
     # Maya set membership edits do not reliably emit attributeChanged.
     # Rebuild material-boundary metadata as well as the per-face target map.
     global _gpu_rebuild,_gpu_graph_dirty
+    if _:
+        try:
+            from .view_scope import is_display_set
+            if is_display_set(om.MFnDependencyNode(_[0]).name()):return
+        except (RuntimeError,TypeError):pass
     _gpu_rebuild=True
     _gpu_graph_dirty=True
     _invalidate()
@@ -167,6 +179,9 @@ def _watch_scene():
     seen = set()
     for name in names:
         try:
+            if cmds.nodeType(name)=='objectSet':
+                from .view_scope import is_display_set
+                if is_display_set(name):continue
             selection = om.MSelectionList()
             selection.add(name)
             obj = selection.getDependNode(0)
@@ -427,6 +442,7 @@ def build_draw_data(camera_path, old_data=None, aspect=1.0, clip=None):
                 return data
             settings=maya_scene.load_settings()
             camera=_camera_data(camera_path,aspect)
+            if _view_mesh_filter is not None:camera['_viewport_mesh_filter']=_view_mesh_filter
             if clip is not None:camera['viewport_clip']=clip
             if _watchers_stale:
                 _watch_scene()
@@ -489,11 +505,15 @@ def build_draw_data(camera_path, old_data=None, aspect=1.0, clip=None):
     return data
 
 
-def _native_prepare(camera_name, aspect):
+def _native_prepare(camera_name, aspect, destination=''):
     """Called synchronously by the native VP2 adapter, never on a worker thread."""
-    global _native_last_groups
+    global _native_last_groups,_view_mesh_filter,_gpu_rebuild,_snapshot
     import ctypes as c
     from . import maya_scene
+    from .view_scope import export_filter
+    current_filter=export_filter(destination)
+    if current_filter!=_view_mesh_filter:
+        _view_mesh_filter=current_filter;_gpu_rebuild=True;_snapshot=None;_invalidate()
     # VP2 may still invoke a locator while its view camera is being removed
     # during scene replacement. Never reuse strokes from the previous view.
     if not camera_name or not cmds.objExists(camera_name):
@@ -641,7 +661,8 @@ def register(plugin_fn):
     global _registered, _native_lib, _native_plugin, _retained_native, DRAW_CLASSIFICATION
     from pathlib import Path
     native_dir=Path(__file__).resolve().parents[2]/'plug-ins'/cmds.about(version=True)
-    retained=native_dir/'reaPencilDraw084.mll'
+    retained=native_dir/'reaPencilDraw087.mll'
+    if not retained.is_file():retained=native_dir/'reaPencilDraw084.mll'
     native_enabled=(os.environ.get('REVTOON_VIEWPORT_BACKEND','gpu')!='cpu' and os.environ.get('REVTOON_NATIVE_DRAW','1')!='0')
     _retained_native=bool(native_enabled and retained.is_file() and os.environ.get('REAPENCIL_RETAINED_VIEWPORT','1')!='0')
     DRAW_CLASSIFICATION='drawdb/subscene/reaToonViewport' if _retained_native else 'drawdb/geometry/reaToonViewport'
@@ -653,6 +674,13 @@ def register(plugin_fn):
         if (native.is_file() and os.environ.get('REVTOON_VIEWPORT_BACKEND','gpu')!='cpu'
                 and os.environ.get('REVTOON_NATIVE_DRAW','1')!='0'):
             import ctypes as c
+            if native.stem=='reaPencilDraw087':
+                for previous in ('reaPencilDraw084',):
+                    if cmds.pluginInfo(previous,q=True,registered=True) and cmds.pluginInfo(previous,q=True,loaded=True):
+                        if not cmds.pluginInfo(previous,q=True,unloadOk=True):raise RuntimeError('Restart Maya to update the GPU viewport module.')
+                        if cmds.pluginInfo(previous,q=True,autoload=True):
+                            cmds.pluginInfo(previous,e=True,autoload=False);cmds.pluginInfo(savePluginPrefs=True)
+                        cmds.unloadPlugin(previous)
             cmds.loadPlugin(str(native),quiet=True)
             _native_plugin=native.stem
             _native_lib=c.CDLL(str(native))

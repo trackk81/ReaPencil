@@ -13,6 +13,11 @@
 #include <maya/MDrawContext.h>
 #include <maya/MUIDrawManager.h>
 #include <maya/MPointArray.h>
+#include <maya/MTextureManager.h>
+#include <maya/MRenderTargetManager.h>
+#include <unordered_map>
+#include <algorithm>
+#include <stdexcept>
 #include <vector>
 #include <memory>
 #include <cstring>
@@ -34,13 +39,66 @@ static bool retainedMode=true;
 static std::vector<Group> groups;
 static MMatrix vp;static int vw=0,vh=0;static unsigned version=0;
 static std::string effect;
+struct Scope {std::vector<float> values;unsigned revision=0,uploaded=~0u;MTexture* texture=nullptr;bool restrictive=false;};
+static std::unordered_map<std::string,Scope> scopes;
+static bool checkCenterDepth=true;
+static int depthStatus=0;
+static std::unordered_map<std::string,unsigned> drawDestinations;
+extern "C" __declspec(dllexport) void rt_reset_draw_log(){drawDestinations.clear();}
+extern "C" __declspec(dllexport) const char* rt_draw_log(){static std::string result;result.clear();for(auto& item:drawDestinations)result+=item.first+"="+std::to_string(item.second)+"\n";return result.c_str();}
+extern "C" __declspec(dllexport) void rt_scope(const char* panel,const float* values,unsigned count){
+    auto& scope=scopes[panel];
+    if(scope.values.size()==count && !std::memcmp(scope.values.data(),values,count*sizeof(float)))return;
+    scope.values.assign(values,values+count);scope.restrictive=std::any_of(values,values+count,[](float v){return v<.5f;});++scope.revision;
+}
+extern "C" __declspec(dllexport) void rt_depth_mode(int enabled){checkCenterDepth=enabled!=0;}
+extern "C" __declspec(dllexport) int rt_depth_status(){return depthStatus;}
+static void uploadScopes(){
+    auto manager=MRenderer::theRenderer()->getTextureManager();
+    for(auto& pair:scopes){auto& scope=pair.second;if(scope.uploaded==scope.revision)continue;
+        if(!scope.restrictive){scope.uploaded=scope.revision;continue;}
+        MTextureDescription description;description.setToDefault2DTexture();
+        description.fWidth=std::min<unsigned>(4096,unsigned(scope.values.size()));
+        if(!description.fWidth)continue;
+        description.fHeight=(unsigned(scope.values.size())+description.fWidth-1)/description.fWidth;
+        description.fFormat=kR32_FLOAT;description.fBytesPerRow=description.fWidth*sizeof(float);
+        description.fBytesPerSlice=description.fBytesPerRow*description.fHeight;
+        std::vector<float> pixels=scope.values;pixels.resize(description.fWidth*description.fHeight,0);
+        if(scope.texture){MTextureDescription previous;scope.texture->textureDescription(previous);
+            if(previous.fWidth!=description.fWidth || previous.fHeight!=description.fHeight){manager->releaseTexture(scope.texture);scope.texture=nullptr;}}
+        if(scope.texture){if(!scope.texture->update(pixels.data(),false,description.fBytesPerRow))throw std::runtime_error("Scope texture update failed");}
+        else scope.texture=manager->acquireTexture((std::string("ReaPencil_scope_")+pair.first+"_"+std::to_string(scope.revision)).c_str(),description,pixels.data(),false);
+        if(!scope.texture)throw std::runtime_error("Scope texture allocation failed");
+        scope.uploaded=scope.revision;
+    }
+}
 static size_t passBegin=0;
 struct SavedState {const MBlendState* blend;const MRasterizerState* raster;const MDepthStencilState* depth;};
 static thread_local std::vector<SavedState> stateStack;
 static const MBlendState* lineBlend=nullptr;
 static const MRasterizerState* lineRaster=nullptr;
 static const MDepthStencilState* lineDepth=nullptr;
-static void preDraw(MDrawContext& context,const MRenderItemList&,MShaderInstance*){
+static void preDraw(MDrawContext& context,const MRenderItemList&,MShaderInstance* shader){
+    MString destination;auto destinationKind=context.renderingDestination(destination);
+    ++drawDestinations[std::to_string(int(destinationKind))+":"+destination.asChar()];
+    auto scope=scopes.find(destination.asChar());if(scope==scopes.end())scope=scopes.find("__all__");
+    bool scoped=scope!=scopes.end() && scope->second.restrictive && scope->second.texture;
+    shader->setParameter("scopeEnabled",scoped);
+    if(scoped){MTextureAssignment assignment;assignment.texture=scope->second.texture;shader->setParameter("scopeTexture",assignment);}
+    auto currentDepth=context.getCurrentDepthRenderTarget();bool hasDepth=false;depthStatus=0;
+    if(currentDepth){MRenderTargetDescription description;currentDepth->targetDescription(description);
+        if(description.multiSampleCount()<=1){
+            MRenderTargetAssignment assignment;assignment.target=const_cast<MRenderTarget*>(currentDepth);
+            hasDepth=bool(shader->setParameter("sceneDepthTexture",assignment));depthStatus=hasDepth?1:3;
+        }else depthStatus=2;
+    }
+    shader->setParameter("hasSceneDepth",hasDepth);shader->setParameter("checkCenterDepth",checkCenterDepth);
+    int x,y,w,h;context.getViewportDimensions(x,y,w,h);float origin[2]={float(x),float(y)};shader->setParameter("viewportOrigin",origin);
+    auto projection=context.getMatrix(MFrameContext::kProjectionMtx);
+    bool ortho=projection(3,3)>.5;auto eye=context.getTuple(ortho?MFrameContext::kViewDirection:MFrameContext::kViewPosition);
+    if(eye.length()>=3){float value[4]={float(eye[0]),float(eye[1]),float(eye[2]),ortho?0.f:1.f};if(ortho)for(int i=0;i<3;i++)value[i]=-value[i];shader->setParameter("eyeVector",value);}
+    shader->setParameter("planeMatrix",context.getMatrix(MFrameContext::kViewProjMtx).inverse().transpose());
+    shader->updateParameters(context);
     auto manager=context.getStateManager();if(!manager)return;
     stateStack.push_back({manager->getBlendState(),manager->getRasterizerState(),manager->getDepthStencilState()});
     if(!lineBlend){
@@ -98,24 +156,30 @@ extern "C" __declspec(dllexport) int rt_add_retained(const double* points,const 
     }catch(...){groups.clear();return 0;}
 }
 extern "C" __declspec(dllexport) void rt_end(){legacyCurrent=legacyPending;legacyPending.reset();++version;}
-class Draw;
-static Draw* activeDraw=nullptr;
-class Draw:public MPxSubSceneOverride {
-    MObjectHandle object;
-    unsigned uploaded=~0u;
+struct GPUGroup {
+    std::vector<std::pair<MString,MVertexBuffer*>> streams;
+    MIndexBuffer* indices=nullptr;MShaderInstance* shader=nullptr;
+    unsigned style=0;MBoundingBox box;
+};
+struct GPUFrame {
+    unsigned revision=~0u,styleRevision=~0u;
     std::vector<std::unique_ptr<MVertexBuffer>> vertices;
     std::vector<std::unique_ptr<MIndexBuffer>> indices;
     std::vector<MShaderInstance*> shaders;
-    std::vector<unsigned> shaderStyles;
-    unsigned uploadedStyle=~0u;
-    std::shared_ptr<LegacyFrame> fallback;
+    std::vector<GPUGroup> groups;
+    ~GPUFrame(){auto renderer=MRenderer::theRenderer();if(renderer)for(auto shader:shaders)renderer->getShaderManager()->releaseShader(shader);}
+};
+static std::shared_ptr<GPUFrame> frameCache;
+static MObjectHandle displayOwner;
+class Draw:public MPxSubSceneOverride {
+    MObjectHandle object;
+    std::shared_ptr<GPUFrame> resources;
+    std::unordered_map<std::string,std::shared_ptr<LegacyFrame>> fallbacks;
     void clear(MSubSceneContainer& container){
-        container.clear();vertices.clear();indices.clear();
-        auto manager=MRenderer::theRenderer()->getShaderManager();
-        for(auto s:shaders)manager->releaseShader(s);shaders.clear();shaderStyles.clear();uploadedStyle=~0u;
+        container.clear();resources.reset();
     }
     void failed(MSubSceneContainer& container){
-        clear(container);uploaded=~0u;fallback.reset();
+        clear(container);frameCache.reset();fallbacks.clear();
         MGlobal::displayWarning("ReaPencil: retained GPU allocation/shader unavailable; switching to the legacy GPU viewport.");
         MGlobal::executePythonCommand("import reatoon.retained_viewport as r; r._device_error='Retained GPU allocation/shader unavailable'; r.vp.request_refresh()",false,false);
     }
@@ -125,8 +189,9 @@ public:
     DrawAPI supportedDrawAPIs()const override{return DrawAPI(kOpenGL|kOpenGLCoreProfile|kDirectX11);}
     bool hasUIDrawables()const override{return true;}
     bool areUIDrawablesDirty()const override{return true;}
-    void addUIDrawables(MUIDrawManager& draw,const MFrameContext&)override{
-        if(!fallback)return;
+    void addUIDrawables(MUIDrawManager& draw,const MFrameContext& context)override{
+        MString destination;context.renderingDestination(destination);auto found=fallbacks.find(destination.asChar());
+        if(found==fallbacks.end() || !found->second)return;auto fallback=found->second;
         draw.beginDrawable(MUIDrawManager::kNonSelectable);
         bool hidden=false;for(auto& g:*fallback)hidden|=g.hidden;
         if(hidden){draw.beginDrawInXray();for(auto& g:*fallback)if(g.hidden){
@@ -146,71 +211,72 @@ public:
         auto iterator=container.getIterator();
         while(auto item=iterator->next())item->enable(status&&enabled);
         iterator->destroy();
-        if(!status||!enabled){fallback.reset();if(activeDraw==this)activeDraw=nullptr;return;}
-        if(activeDraw && activeDraw!=this){clear(container);fallback.reset();return;}
-        activeDraw=this;
+        if(!status||!enabled){fallbacks.clear();if(displayOwner==object)displayOwner=MObjectHandle();return;}
+        if(!displayOwner.isValid()||!displayOwner.isAlive())displayOwner=object;
+        if(displayOwner!=object){clear(container);fallbacks.clear();return;}
         int x,y;context.getViewportDimensions(x,y,vw,vh);vp=context.getMatrix(MFrameContext::kViewProjMtx);
-        auto path=context.getCurrentCameraPath();std::ostringstream code;
-        code<<"import reatoon.retained_viewport as r; r.prepare('"<<path.fullPathName().asChar()<<"',"<<double(vw)/std::max(vh,1)<<","<<int(MRenderer::theRenderer()->drawAPI())<<")";
+        auto path=context.getCurrentCameraPath();MString destination;context.renderingDestination(destination);std::ostringstream code;
+        code<<"import reatoon.retained_viewport as r; r.prepare('"<<path.fullPathName().asChar()<<"',"<<double(vw)/std::max(vh,1)<<","<<int(MRenderer::theRenderer()->drawAPI())<<",'"<<destination.asChar()<<"')";
         status=MGlobal::executePythonCommand(code.str().c_str(),false,false);
-        if(!status){clear(container);uploaded=~0u;fallback.reset();return;}
-        if(!retainedMode){clear(container);uploaded=~0u;fallback=legacyCurrent;return;}
-        fallback.reset();
+        if(!status){clear(container);fallbacks.clear();return;}
+        if(!retainedMode){clear(container);frameCache.reset();fallbacks[destination.asChar()]=legacyCurrent;return;}
+        fallbacks.clear();
+        uploadScopes();
         auto manager=MRenderer::theRenderer()->getShaderManager();
-        if(uploaded!=version){
-            clear(container);
+        if(!frameCache || frameCache->revision!=version){
+            auto next=std::make_shared<GPUFrame>();
             for(unsigned j=0;j<groups.size();j++){
                 auto& g=groups[j];unsigned n=unsigned(g.positions.size()/3);if(!n)continue;
                 auto shader=manager->getEffectsFileShader(effect.c_str(),"Main",nullptr,0,true,preDraw,postDraw);
-                if(!shader){failed(container);return;}
+                if(!shader)throw std::runtime_error("Line shader allocation failed");
+                next->shaders.push_back(shader);GPUGroup gpu;gpu.shader=shader;gpu.style=g.style;gpu.box=g.box;
                 shader->setParameter("lineColor",g.color);shader->setParameter("lineWidth",g.width);
-                auto item=MRenderItem::Create(MString("reaPencil_")+int(j),MRenderItem::DecorationItem,MGeometry::kLines);
-                item->setDrawMode(MGeometry::kAll);item->enable(true);item->setShader(shader);container.add(item);shaders.push_back(shader);shaderStyles.push_back(g.style);
-                MVertexBufferDescriptorList descriptors;shader->requiredVertexBuffers(descriptors);MVertexBufferArray streams;
-                int channel=0;
+                MVertexBufferDescriptorList descriptors;shader->requiredVertexBuffers(descriptors);
                 for(int i=0;i<descriptors.length();i++){
                     MVertexBufferDescriptor descriptor;descriptors.getDescriptor(i,descriptor);
                     bool position=descriptor.semantic()==MGeometry::kPosition;
                     const auto& values=position?g.positions:g.a;
                     auto buffer=std::make_unique<MVertexBuffer>(descriptor);
-                    auto data=buffer->acquire(n,true);if(!data){failed(container);return;}
-                    if(values.size()!=size_t(n)*descriptor.dimension()){MGlobal::displayError("ReaPencil shader stream dimension mismatch");return;}
+                    auto data=buffer->acquire(n,true);if(!data)throw std::runtime_error("Vertex allocation failed");
+                    if(values.size()!=size_t(n)*descriptor.dimension())throw std::runtime_error("Shader stream dimension mismatch");
                     std::memcpy(data,values.data(),values.size()*sizeof(float));buffer->commit(data);
-                    MString name=position?"positions":"normalA";streams.addBuffer(name,buffer.get());vertices.push_back(std::move(buffer));
+                    MString name=position?"positions":"normalA";gpu.streams.emplace_back(name,buffer.get());next->vertices.push_back(std::move(buffer));
                 }
                 auto ib=std::make_unique<MIndexBuffer>(MGeometry::kUnsignedInt32);
-                auto ids=static_cast<unsigned*>(ib->acquire(n,true));if(!ids){failed(container);return;}
+                auto ids=static_cast<unsigned*>(ib->acquire(n,true));if(!ids)throw std::runtime_error("Index allocation failed");
                 for(unsigned i=0;i<n;i++)ids[i]=i;ib->commit(ids);
-                status=setGeometryForRenderItem(*item,streams,*ib,&g.box);indices.push_back(std::move(ib));
-                if(!status){MGlobal::displayError("ReaPencil shader geometry binding failed");return;}
+                gpu.indices=ib.get();next->indices.push_back(std::move(ib));next->groups.push_back(std::move(gpu));
                 std::vector<float>().swap(g.positions);std::vector<float>().swap(g.a);
             }
-            uploaded=version;groups.clear();
+            next->revision=version;frameCache=std::move(next);groups.clear();
         }
-        auto cameraMatrix=path.inclusiveMatrix();MFnCamera camera(path);
-        float eye[4];
-        if(camera.isOrtho()){for(int i=0;i<3;i++)eye[i]=float(cameraMatrix[2][i]);eye[3]=0;}
-        else{for(int i=0;i<3;i++)eye[i]=float(cameraMatrix[3][i]);eye[3]=1;}
-        MMatrix planes=vp.inverse().transpose();
-        for(auto shader:shaders){shader->setParameter("eyeVector",eye);shader->setParameter("planeMatrix",planes);}
-        if(uploadedStyle!=styleVersion){
-            for(size_t i=0;i<shaders.size();i++)if(shaderStyles[i]<styles.size()){
-                auto& s=styles[shaderStyles[i]];shaders[i]->setParameter("lineColor",s.color);shaders[i]->setParameter("lineWidth",s.width);
+        if(resources!=frameCache){
+            clear(container);resources=frameCache;
+            for(size_t j=0;j<resources->groups.size();++j){auto& g=resources->groups[j];
+                auto item=MRenderItem::Create(MString("reaPencil_")+int(j),MRenderItem::DecorationItem,MGeometry::kLines);
+                item->setDrawMode(MGeometry::kAll);item->enable(true);item->setShader(g.shader);container.add(item);
+                MVertexBufferArray streams;for(auto& stream:g.streams)streams.addBuffer(stream.first,stream.second);
+                if(!setGeometryForRenderItem(*item,streams,*g.indices,&g.box))throw std::runtime_error("Shader geometry binding failed");
             }
-            uploadedStyle=styleVersion;
         }
+        if(resources->styleRevision!=styleVersion){for(auto& g:resources->groups)if(g.style<styles.size()){
+            auto& s=styles[g.style];g.shader->setParameter("lineColor",s.color);g.shader->setParameter("lineWidth",s.width);
+        }resources->styleRevision=styleVersion;}
         MGlobal::executePythonCommand("import reatoon.viewport as v; v._retained_probe_ready=True",false,false);
     }
-    ~Draw(){if(activeDraw==this)activeDraw=nullptr;auto renderer=MRenderer::theRenderer();if(renderer)for(auto s:shaders)renderer->getShaderManager()->releaseShader(s);}
+    ~Draw()=default;
 };
 static const MString classification("drawdb/subscene/reaToonViewport"),registrant("ReaPencilRetainedGPU");
 MStatus initializePlugin(MObject obj){
-    MFnPlugin fn(obj,"ReaPencil independent project","0.8.4","Any");
+    MFnPlugin fn(obj,"ReaPencil independent project","0.8.7","Any");
     return MDrawRegistry::registerSubSceneOverrideCreator(classification,registrant,Draw::create);
 }
 MStatus uninitializePlugin(MObject){
+    frameCache.reset();displayOwner=MObjectHandle();
     MStateManager::releaseBlendState(lineBlend);MStateManager::releaseRasterizerState(lineRaster);MStateManager::releaseDepthStencilState(lineDepth);
     lineBlend=nullptr;lineRaster=nullptr;lineDepth=nullptr;
     legacyCurrent.reset();legacyPending.reset();groups.clear();styles.clear();
+    auto renderer=MRenderer::theRenderer();if(renderer){auto manager=renderer->getTextureManager();for(auto& pair:scopes)if(pair.second.texture)manager->releaseTexture(pair.second.texture);}
+    scopes.clear();
     return MDrawRegistry::deregisterSubSceneOverrideCreator(classification,registrant);
 }

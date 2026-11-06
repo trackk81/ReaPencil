@@ -29,6 +29,10 @@ def bind(lib):
     lib.rt_add.argtypes=[c.c_void_p,c.c_uint,c.c_float,c.POINTER(c.c_float),c.c_int,c.POINTER(c.c_float),c.c_int]
     lib.rt_add.restype=c.c_int
     lib.rt_effect(str(Path(__file__).parent/'shaders/retained_lines.ogsfx').encode('utf-8'))
+    if hasattr(lib,'rt_scope'):
+        lib.rt_scope.argtypes=[c.c_char_p,c.c_void_p,c.c_uint];lib.rt_scope.restype=None
+        from . import view_scope
+        view_scope.reset()
 
 def _switch(mode):
     global _mode,_key,_passes,_geometry_style_key
@@ -38,28 +42,33 @@ def _switch(mode):
         _key=None;_passes=None;_geometry_style_key=None;_mode=mode
     _library.rt_mode(mode=='retained')
 
-def _fallback(camera_name,aspect,reason):
+def _fallback(camera_name,aspect,reason,destination=''):
     global _fallback_generation,_fallback_reason
-    _switch('legacy');vp._native_prepare(camera_name,aspect)
+    _switch('legacy');vp._native_prepare(camera_name,aspect,destination)
     _fallback_generation=vp._generation;_fallback_reason=reason
     vp._last_report['retained_fallback_reason']=reason
 
-def prepare(camera_name,aspect,draw_api=4):
+def prepare(camera_name,aspect,draw_api=4,destination=''):
     global _last_api,_fallback_generation
     api_changed=_last_api!=draw_api
     if api_changed:_fallback_generation=-1;_last_api=draw_api
     if not camera_name or not cmds.objExists(camera_name):
         _library.rt_begin();_library.rt_end();return
-    if draw_api!=4:return _fallback(camera_name,aspect,'Retained drawing requires OpenGL Core Profile')
-    if _device_error:return _fallback(camera_name,aspect,_device_error)
+    if draw_api!=4:return _fallback(camera_name,aspect,'Retained drawing requires OpenGL Core Profile',destination)
+    if _device_error:return _fallback(camera_name,aspect,_device_error,destination)
     # Vertex animation does not turn non-manifold topology into manifold
     # topology. Keep its live GPU scene instead of rebuilding both backends.
     if _mode=='legacy' and not api_changed and not (vp._gpu_rebuild or vp._gpu_graph_dirty or vp._gpu_style_dirty):
-        return _fallback(camera_name,aspect,_fallback_reason)
+        return _fallback(camera_name,aspect,_fallback_reason,destination)
     _switch('retained')
-    try:_prepare(camera_name,aspect)
+    try:
+        _prepare(camera_name,aspect)
+        if hasattr(_library,'rt_scope') and vp._gpu_scene is not None:
+            from . import view_scope
+            vp._last_report['view_scopes']=view_scope.sync(_library,[m['name'] for m in vp._gpu_scene.scene['meshes']],destination)
+            vp._last_report['draw_destination']=destination
     except retained_geometry.UnsupportedRetained as error:
-        _fallback(camera_name,aspect,str(error))
+        _fallback(camera_name,aspect,str(error),destination)
 
 def _prepare(camera_name,aspect):
     global _key,_passes,_geometry_style_key
@@ -143,7 +152,7 @@ def _prepare(camera_name,aspect):
             gpu=live.gpu;gpu.configure_face_styles(item['face_style_ids'],len(styles),item.get('selected_edges'))
             gpu.set_camera(camera) # No viewport_clip: retain ALL pages and future views.
             cross,owners,report=gpu.intersections(styles,settings.get('intersection_tolerance',1e-7))
-            parameters=gpu.cross_planes.copy();parameters[:,0,3]=0;parameters[:,1,3]=1
+            parameters=gpu.cross_planes.copy();parameters[:,:,3]=(parameters[:,:,3]+1)*2
             submit(cross.reshape(-1,2,4)[:,:,:3],parameters,styles,owners)
             cross_total+=len(owners);pass_reports.append(report)
             for i,mesh in enumerate(live.scene['meshes']):
@@ -155,7 +164,7 @@ def _prepare(camera_name,aspect):
                     raise retained_geometry.UnsupportedRetained(mesh['name']+': '+str(error)) from error
                 parameters=np.zeros((len(data['owners']),2,4),np.float32)
                 parameters[:,0,:3]=data['normal0'];parameters[:,1,:3]=data['normal1']
-                parameters[:,0,3]=data['dynamic']
+                parameters[:,0,3]=2*(i+1)+data['dynamic'];parameters[:,1,3]=2*(i+1)
                 submit(data['points'],parameters,styles,data['owners']);edge_total+=len(data['owners'])
     _library.rt_end()
     _geometry_style_key=geometry_style_key

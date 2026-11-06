@@ -291,7 +291,11 @@ class PagedGPUScene:
                     if found:
                         results.append(r.read(a.cross_output,(found*2,4)))
                         owners.append(r.read(a.cross_output_owners,found,np.int32))
-                        if self.retain_planes:planes.append(r.read(a.cross_sourceplanes,(found,2,4),np.float32))
+                        if self.retain_planes:
+                            payload=r.read(a.cross_sourceplanes,(found,2,4),np.float32)
+                            payload[:,0,3]=self.pages[ai].ids[payload[:,0,3].astype(np.int32)]
+                            payload[:,1,3]=self.pages[bi].ids[payload[:,1,3].astype(np.int32)]
+                            planes.append(payload)
                 finally:pairs.close()
         # The shared output scratch was used for cross-page strokes. Local
         # intersections are retained as CPU cache only; no resident direct read.
@@ -326,7 +330,10 @@ class PagedGPUScene:
                     found=int(r.read(a.counter,1,np.int32)[0])
                     if found:
                         results.append(r.read(a.cross_output,(found*2,4)));owners.append(r.read(a.cross_output_owners,found,np.int32))
-                        if self.retain_planes:planes.append(r.read(a.cross_sourceplanes,(found,2,4),np.float32))
+                        if self.retain_planes:
+                            payload=r.read(a.cross_sourceplanes,(found,2,4),np.float32)
+                            payload[:,:,3]=self.pages[index].ids[payload[:,:,3].astype(np.int32)]
+                            planes.append(payload)
                 finally:pairs.close()
         result=(np.concatenate(results) if results else np.empty((0,4)),
                 np.concatenate(owners) if owners else np.empty(0,np.int32),candidates)
