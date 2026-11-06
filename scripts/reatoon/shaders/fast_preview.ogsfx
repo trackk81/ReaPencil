@@ -8,6 +8,9 @@ uniform float lineWidth=1.5;
 uniform float creaseThreshold=0.25;
 uniform texture2D sceneColor;
 uniform texture2D sceneDepth;
+uniform bool targetAll=false;
+uniform texture2D targetDepth;
+uniform sampler2D targetSampler=sampler_state {Texture=<targetDepth>;TEXTURE_MIN_FILTER=NEAREST;TEXTURE_MAG_FILTER=NEAREST;TEXTURE_WRAP_S=CLAMP_TO_EDGE;TEXTURE_WRAP_T=CLAMP_TO_EDGE;};
 uniform sampler2D colorSampler=sampler_state {Texture=<sceneColor>;TEXTURE_MIN_FILTER=NEAREST;TEXTURE_MAG_FILTER=NEAREST;TEXTURE_WRAP_S=CLAMP_TO_EDGE;TEXTURE_WRAP_T=CLAMP_TO_EDGE;};
 uniform sampler2D depthSampler=sampler_state {Texture=<sceneDepth>;TEXTURE_MIN_FILTER=NEAREST;TEXTURE_MAG_FILTER=NEAREST;TEXTURE_WRAP_S=CLAMP_TO_EDGE;TEXTURE_WRAP_T=CLAMP_TO_EDGE;};
 attribute Input {vec4 position:POSITION;vec2 texcoord:TEXCOORD0;};
@@ -23,6 +26,11 @@ GLSLShader FastPixel {
         vec3 c=location(p),l=c-location(p-ivec2(1,0)),r=location(p+ivec2(1,0))-c;
         vec3 d=c-location(p-ivec2(0,1)),u=location(p+ivec2(0,1))-c;
         return normalize(cross(abs(l.z)<abs(r.z)?l:r,abs(d.z)<abs(u.z)?d:u));
+    }
+    bool targeted(ivec2 p){
+        if(targetAll)return true;
+        p=clamp(p,ivec2(0),ivec2(imageSize)-1);float own=texelFetch(targetSampler,p,0).r,scene=depthAt(p);
+        return own<.999999&&abs(own-scene)<=4./16777215.;
     }
     void main(){
         vec4 base=texture(colorSampler,uv);ivec2 p=ivec2(uv*imageSize);int radius=max(int(floor(lineWidth*.5+.5)),1);
@@ -44,10 +52,43 @@ GLSLShader FastPixel {
                 coverage=max(coverage,max(smoothstep(creaseThreshold,creaseThreshold+.12,bend),smoothstep(1.5,3.,gap)));
             }
         }
-        result=vec4(mix(base.rgb,lineColor.rgb,coverage),base.a);
+        bool allowed=targeted(p);
+        // Extend only into empty background, never across an untargeted surface.
+        if(!here)allowed=targeted(p+ivec2(radius,0))||targeted(p-ivec2(radius,0))||targeted(p+ivec2(0,radius))||targeted(p-ivec2(0,radius));
+        result=vec4(mix(base.rgb,lineColor.rgb,allowed?coverage:0.),base.a);
     }
 }
 technique Main {pass P {
     VertexShader(in Input,out Interpolated)=FastVertex;
     PixelShader(in Interpolated,out Output)=FastPixel;
+}}
+
+GLSLShader FastAA {
+    float luma(vec3 p){return dot(p,vec3(.299,.587,.114));}
+    void main(){
+        vec2 px=1./imageSize;vec4 center=texture(colorSampler,uv);
+        vec3 nw=texture(colorSampler,uv+px*vec2(-1,-1)).rgb,ne=texture(colorSampler,uv+px*vec2(1,-1)).rgb;
+        vec3 sw=texture(colorSampler,uv+px*vec2(-1,1)).rgb,se=texture(colorSampler,uv+px*vec2(1,1)).rgb;
+        float a=luma(nw),b=luma(ne),c=luma(sw),d=luma(se),m=luma(center.rgb);
+        float low=min(m,min(min(a,b),min(c,d))),high=max(m,max(max(a,b),max(c,d)));
+        if(high-low<max(.06,high*.125)){result=center;return;}
+        vec2 direction=vec2(c+d-a-b,a+c-b-d);
+        direction=clamp(direction/(min(abs(direction.x),abs(direction.y))+max((a+b+c+d)*.0078125,.0078125)),vec2(-8),vec2(8))*px;
+        vec3 mid=.5*(texture(colorSampler,uv-direction/6.).rgb+texture(colorSampler,uv+direction/6.).rgb);
+        vec3 wide=.5*mid+.25*(texture(colorSampler,uv-direction*.5).rgb+texture(colorSampler,uv+direction*.5).rgb);
+        float value=luma(wide);result=vec4(value<low||value>high?mid:wide,center.a);
+    }
+}
+technique AA {pass P {
+    VertexShader(in Input,out Interpolated)=FastVertex;
+    PixelShader(in Interpolated,out Output)=FastAA;
+}}
+
+uniform mat4 maskMatrix : WorldViewProjection;
+uniform bool maskAllowed=false;
+GLSLShader MaskVertex {void main(){gl_Position=maskMatrix*position;}}
+GLSLShader MaskPixel {void main(){if(!maskAllowed)discard;result=vec4(1);}}
+technique Mask {pass P {
+    VertexShader(in Input)=MaskVertex;
+    PixelShader(out Output)=MaskPixel;
 }}

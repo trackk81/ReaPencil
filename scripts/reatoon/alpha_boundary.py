@@ -1,4 +1,5 @@
 """Opt-in alpha boundary settings on Maya meshes and non-destructive export."""
+from .i18n import tr
 import json,os
 from functools import lru_cache
 import numpy as np
@@ -266,31 +267,31 @@ def show():
     from .ui import _safe
     window='reaPencilAlphaBoundaryWindow'
     if cmds.window(window,exists=True):cmds.deleteUI(window)
-    cmds.window(window,title='ReaPencil — Alpha Boundary',widthHeight=(470,340))
+    cmds.window(window,title=tr('ReaPencil — Alpha Boundary'),widthHeight=(470,340))
     cmds.columnLayout(adjustableColumn=True,rowSpacing=8)
-    cmds.text(label='Select objects or materials. Original meshes stay unchanged.',align='left')
-    cmds.text(label='Cutout boundaries are used by live lines and CPU rendering.',align='left')
-    file=cmds.textFieldButtonGrp(label='Image (optional)',buttonLabel='Browse',text='')
+    cmds.text(label=tr('Select objects or materials. Original meshes stay unchanged.'),align='left')
+    cmds.text(label=tr('Cutout boundaries are used by live lines and CPU rendering.'),align='left')
+    file=cmds.textFieldButtonGrp(label=tr('Image (optional)'),buttonLabel=tr('Browse'),text=tr(''))
     def browse(*_):
         chosen=cmds.fileDialog2(fileMode=1,caption='Choose alpha or opacity image')
         if chosen:cmds.textFieldButtonGrp(file,e=True,text=chosen[0])
     cmds.textFieldButtonGrp(file,e=True,buttonCommand=browse)
-    cmds.text(label='Blank image: detect opacity textures from assigned materials.',align='left')
-    channel=cmds.optionMenuGrp(label='Image channel')
-    for label in ('Alpha','Luminance','Red','Green','Blue'):cmds.menuItem(label=label)
-    invert=cmds.checkBoxGrp(label='Invert',value1=False)
-    threshold=cmds.floatSliderGrp(label='Threshold',field=True,minValue=.01,maxValue=.99,value=.5)
-    resolution=cmds.intFieldGrp(label='Boundary resolution',value1=256)
-    simplify=cmds.floatFieldGrp(label='Simplify (pixels)',value1=.25)
-    status=cmds.text(label='',align='left',wordWrap=True)
+    cmds.text(label=tr('Blank image: detect opacity textures from assigned materials.'),align='left')
+    channel=cmds.optionMenuGrp(label=tr('Image channel'))
+    for label in ('Alpha','Luminance','Red','Green','Blue'):cmds.menuItem(label=tr(label))
+    invert=cmds.checkBoxGrp(label=tr('Invert'),value1=False)
+    threshold=cmds.floatSliderGrp(label=tr('Threshold'),field=True,minValue=.01,maxValue=.99,value=.5)
+    resolution=cmds.intFieldGrp(label=tr('Boundary resolution'),value1=256)
+    simplify=cmds.floatFieldGrp(label=tr('Simplify (pixels)'),value1=.25)
+    status=cmds.text(label=tr(''),align='left',wordWrap=True)
     def apply(*_):
         shapes=apply_selected(cmds.textFieldButtonGrp(file,q=True,text=True).strip(),
             cmds.optionMenuGrp(channel,q=True,value=True).lower(),cmds.checkBoxGrp(invert,q=True,value1=True),
             cmds.floatSliderGrp(threshold,q=True,value=True),cmds.intFieldGrp(resolution,q=True,value1=True),
             cmds.floatFieldGrp(simplify,q=True,value1=True))
-        cmds.text(status,e=True,label='Applied to %d mesh(es). Enable Open Edges in the Line Set.'%len(shapes))
-    cmds.button(label='Apply / Update Selected',command=lambda *_:_safe(apply))
-    cmds.button(label='Remove from Selected',command=lambda *_:_safe(remove_selected))
+        cmds.text(status,e=True,label=tr('Applied to %d mesh(es). Enable Open Edges in the Line Set.'%len(shapes)))
+    cmds.button(label=tr('Apply / Update Selected'),command=lambda *_:_safe(apply))
+    cmds.button(label=tr('Remove from Selected'),command=lambda *_:_safe(remove_selected))
     selected=selected_meshes()
     current=configuration(selected[0]) if selected else None
     if current:

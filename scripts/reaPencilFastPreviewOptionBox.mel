@@ -1,0 +1,4 @@
+global proc reaPencilFastPreviewOptionBox()
+{
+    python("from reatoon import fast_viewport; fast_viewport.show()");
+}

@@ -1,4 +1,5 @@
 """Nonblocking Maya update dialog; installs only after all Maya sessions exit."""
+from .i18n import tr
 import hashlib,json,os,shutil,subprocess,sys,threading
 from pathlib import Path
 from maya import cmds,utils,OpenMayaUI
@@ -11,21 +12,21 @@ _window=None
 class Updates(QtWidgets.QDialog):
     def __init__(self):
         super().__init__(wrapInstance(int(OpenMayaUI.MQtUtil.mainWindow()),QtWidgets.QWidget))
-        self.setWindowTitle('ReaPencil 업데이트');self.resize(530,340);self.info=None;self.busy=False
+        self.setWindowTitle(tr('ReaPencil 업데이트'));self.resize(530,340);self.info=None;self.busy=False
         self.root=Path(__file__).resolve().parents[2]
         self.seen_status=None
         base=Path(cmds.internalVar(userAppDir=True))/'ReaPencilUpdates'
         self.cache=base/hashlib.sha256(str(self.root).encode()).hexdigest()[:16];self.cache.mkdir(parents=True,exist_ok=True)
         layout=QtWidgets.QVBoxLayout(self)
-        layout.addWidget(QtWidgets.QLabel('현재 버전 '+__version__+' · GitHub '+update_core.REPOSITORY))
-        self.status=QtWidgets.QLabel('업데이트 확인을 누르세요.');self.status.setWordWrap(True);layout.addWidget(self.status)
+        layout.addWidget(QtWidgets.QLabel(tr('현재 버전 '+__version__+' · GitHub '+update_core.REPOSITORY)))
+        self.status=QtWidgets.QLabel(tr('업데이트 확인을 누르세요.'));self.status.setWordWrap(True);layout.addWidget(self.status)
         self.notes=QtWidgets.QPlainTextEdit();self.notes.setReadOnly(True);layout.addWidget(self.notes)
-        layout.addWidget(QtWidgets.QLabel('설치 예약 후 작업을 저장하고 모든 Maya를 직접 종료하세요.\n설치 완료 후 Maya를 다시 실행하면 적용됩니다.'))
+        layout.addWidget(QtWidgets.QLabel(tr('설치 예약 후 작업을 저장하고 모든 Maya를 직접 종료하세요.\n설치 완료 후 Maya를 다시 실행하면 적용됩니다.')))
         row=QtWidgets.QHBoxLayout();layout.addLayout(row)
-        self.check_button=QtWidgets.QPushButton('업데이트 확인');self.install_button=QtWidgets.QPushButton('다운로드 및 설치 예약')
+        self.check_button=QtWidgets.QPushButton(tr('업데이트 확인'));self.install_button=QtWidgets.QPushButton(tr('다운로드 및 설치 예약'))
         self.install_button.setEnabled(False);self.check_button.clicked.connect(self.check);self.install_button.clicked.connect(self.install)
         row.addWidget(self.check_button);row.addWidget(self.install_button)
-        self.cancel_button=QtWidgets.QPushButton('설치 예약 취소');self.cancel_button.clicked.connect(self.cancel);row.addWidget(self.cancel_button)
+        self.cancel_button=QtWidgets.QPushButton(tr('설치 예약 취소'));self.cancel_button.clicked.connect(self.cancel);row.addWidget(self.cancel_button)
         self.timer=QtCore.QTimer(self);self.timer.timeout.connect(self.poll);self.timer.start(1000);self.poll()
 
     def background(self,fn,done):
@@ -36,19 +37,19 @@ class Updates(QtWidgets.QDialog):
             def complete():
                 if not isValid(self):return
                 self.busy=False;self.check_button.setEnabled(True)
-                if error:self.status.setText('업데이트 실패: '+error)
+                if error:self.status.setText(tr('업데이트 실패: '+error))
                 else:
                     try:done(value)
-                    except Exception as exc:self.status.setText('업데이트 실패: '+str(exc))
+                    except Exception as exc:self.status.setText(tr('업데이트 실패: '+str(exc)))
             utils.executeDeferred(complete)
         threading.Thread(target=task,daemon=True).start()
 
     def check(self):
         if self.busy:return
-        self.status.setText('GitHub에서 최신 정식 버전을 확인하고 있습니다…')
+        self.status.setText(tr('GitHub에서 최신 정식 버전을 확인하고 있습니다…'))
         def done(info):
             self.info=info;self.notes.setPlainText(info['notes'])
-            self.status.setText(('새 버전 '+info['version']+' · %.1f MB'%(info['size']/1024**2)) if info['available'] else '최신 버전입니다. ('+__version__+')')
+            self.status.setText(tr(('새 버전 '+info['version']+' · %.1f MB'%(info['size']/1024**2)) if info['available'] else '최신 버전입니다. ('+__version__+')'))
             self.install_button.setEnabled(info['available'])
         self.background(lambda:update_core.latest(__version__),done)
 
@@ -57,9 +58,9 @@ class Updates(QtWidgets.QDialog):
         if not self.info or not self.info['available']:self.check();return
         existing=self.pending()
         if existing and existing.get('state') in ('waiting_for_maya_exit','installing'):
-            self.status.setText('이미 설치가 예약되어 있습니다.');return
+            self.status.setText(tr('이미 설치가 예약되어 있습니다.'));return
         info=dict(self.info)
-        self.status.setText('배포 파일 다운로드 및 SHA-256 검증 중…')
+        self.status.setText(tr('배포 파일 다운로드 및 SHA-256 검증 중…'))
         def done(payload):
             marker=json.loads((self.root/'reatoon-install.json').read_text(encoding='utf-8'))
             if not marker.get('modules_dir'):raise RuntimeError('설치 위치 정보가 없습니다. 최신 배포본으로 한 번 재설치하세요.')
@@ -76,7 +77,7 @@ class Updates(QtWidgets.QDialog):
                 subprocess.Popen([str(exe),'-s','-c',bootstrap],stdout=log,stderr=subprocess.STDOUT,
                                  env=environment,creationflags=subprocess.CREATE_NO_WINDOW|subprocess.DETACHED_PROCESS,close_fds=True)
             (self.cache/'pending.json').write_text(json.dumps(dict(job=str(job_file),status=str(job_dir/'status.json'))),encoding='utf-8')
-            self.status.setText('설치 예약 완료. 작업을 저장하고 모든 Maya 창을 닫으세요.');self.poll()
+            self.status.setText(tr('설치 예약 완료. 작업을 저장하고 모든 Maya 창을 닫으세요.'));self.poll()
         self.background(lambda:update_core.stage(info,self.cache),done)
 
     def pending(self):
@@ -95,14 +96,14 @@ class Updates(QtWidgets.QDialog):
             if signature==self.seen_status:return
             self.seen_status=signature
             messages={'waiting_for_maya_exit':'설치 예약 중: 모든 Maya 창을 닫으면 적용됩니다.','installing':'업데이트 설치 중…','installed':'업데이트 설치 완료. 현재 실행 버전: '+__version__,'cancelled':'설치 예약이 취소되었습니다.','error':'설치 실패: '+state.get('error','')}
-            self.status.setText(messages.get(state['state'],state['state']))
-        except Exception as error:self.status.setText(str(error))
+            self.status.setText(tr(messages.get(state['state'],state['state'])))
+        except Exception as error:self.status.setText(tr(str(error)))
 
     def cancel(self):
         p=self.cache/'pending.json'
         if p.is_file():
             job=json.loads(p.read_text(encoding='utf-8'))['job'];Path(job).with_name('cancel').touch()
-            self.status.setText('설치 예약 취소 요청 중…')
+            self.status.setText(tr('설치 예약 취소 요청 중…'))
 
 def show():
     global _window

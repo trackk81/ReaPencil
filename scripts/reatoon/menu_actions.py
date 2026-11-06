@@ -2,6 +2,7 @@
 
 Cleanup removes owned graph containers only, never their geometry or shaders.
 """
+from .i18n import tr
 import json
 from maya import cmds, mel
 from . import maya_scene, line_graph
@@ -72,7 +73,7 @@ def import_pencil_scene():
         window='revToonMigrationReport'
         if cmds.window(window,exists=True):
             cmds.deleteUI(window)
-        cmds.window(window,title='Pencil+ → ReaPencil 가져오기 결과',widthHeight=(650,360))
+        cmds.window(window,title=tr('Pencil+ → ReaPencil 가져오기 결과'),widthHeight=(650,360))
         cmds.columnLayout(adjustableColumn=True)
         if report.get('status')=='no_pencil_nodes':
             summary='현재 장면에 Pencil+ 노드가 없습니다. Pencil+ 장면을 연 뒤 다시 실행하세요.'
@@ -80,18 +81,18 @@ def import_pencil_scene():
             summary='Line: 새로 생성 %d / 갱신 %d\nLine Set: 새로 생성 %d / 갱신 %d' % (
                 len(report.get('created_lines',[])),len(report.get('updated_lines',[])),
                 len(report.get('created_line_sets',[])),len(report.get('updated_line_sets',[])))
-        cmds.text(label=summary,align='left',wordWrap=True,height=50)
+        cmds.text(label=tr(summary),align='left',wordWrap=True,height=50)
         if report.get('runtime_missing'):
-            cmds.text(label='Pencil+ 없이 저장 데이터에서 %d개 노드를 읽었습니다.\n저장되지 않은 기본값은 Pencil+ 4.2.3 기준으로 복원합니다.' %
-                      len(report.get('recovered_unknown_nodes',[])),align='left',wordWrap=True,height=45)
-        cmds.text(label='원본 Pencil+ 노드와 기존 셰이더 연결은 유지됩니다.',align='left',height=25)
+            cmds.text(label=tr('Pencil+ 없이 저장 데이터에서 %d개 노드를 읽었습니다.\n저장되지 않은 기본값은 Pencil+ 4.2.3 기준으로 복원합니다.' %
+                      len(report.get('recovered_unknown_nodes',[]))),align='left',wordWrap=True,height=45)
+        cmds.text(label=tr('원본 Pencil+ 노드와 기존 셰이더 연결은 유지됩니다.'),align='left',height=25)
         unsupported=report.get('unsupported',[])
-        cmds.text(label='미지원·확인 필요 항목: %d개 (상세 결과에서 확인)' % len(unsupported),align='left',height=25)
+        cmds.text(label=tr('미지원·확인 필요 항목: %d개 (상세 결과에서 확인)' % len(unsupported)),align='left',height=25)
         def edit_imported(*_):
             cmds.deleteUI(window)
             line_editor._open(first)
-        cmds.button(label='이전된 Line 편집',enable=bool(first),command=edit_imported)
-        cmds.frameLayout(label='상세 결과 / 미지원 항목',collapsable=True,collapse=True)
+        cmds.button(label=tr('이전된 Line 편집'),enable=bool(first),command=edit_imported)
+        cmds.frameLayout(label=tr('상세 결과 / 미지원 항목'),collapsable=True,collapse=True)
         cmds.scrollField(editable=False,wordWrap=True,text=json.dumps(report,ensure_ascii=False,indent=2),height=260)
         cmds.showWindow(window)
     return report

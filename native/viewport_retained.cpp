@@ -225,6 +225,9 @@ public:
     void updateFrame(MSubSceneContainer& container,const MFrameContext& context){
         if(!object.isValid()||!object.isAlive())return;
         MStatus status;auto enabled=MFnDependencyNode(object.object()).findPlug("linePreviewEnabled",true,&status).asBool();
+        MString panel;context.renderingDestination(panel);int allowed=1;
+        MGlobal::executePythonCommand(MString("import reatoon.preview_renderers as p; int(p.allowed('")+panel+"'))",allowed,false,false);
+        enabled=enabled&&allowed;
         auto iterator=container.getIterator();
         while(auto item=iterator->next())item->enable(status&&enabled);
         iterator->destroy();
@@ -289,7 +292,7 @@ public:
 };
 static const MString classification("drawdb/subscene/reaToonViewport"),registrant("ReaPencilRetainedGPU");
 MStatus initializePlugin(MObject obj){
-    MFnPlugin fn(obj,"ReaPencil independent project","0.8.8","Any");
+    MFnPlugin fn(obj,"ReaPencil independent project","0.8.10","Any");
     return MDrawRegistry::registerSubSceneOverrideCreator(classification,registrant,Draw::create);
 }
 MStatus uninitializePlugin(MObject){

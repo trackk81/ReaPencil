@@ -142,6 +142,8 @@ def uninitializePlugin(plugin):
         ui.remove_menu()
         updater=sys.modules.get('reatoon.update_ui')
         if updater is not None:updater.close()
+    from . import preview_renderers
+    preview_renderers.unregister()
     render_integration.unregister()
     fn = om.MFnPlugin(plugin)
     viewport.unregister(fn)

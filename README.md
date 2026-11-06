@@ -2,7 +2,7 @@
 
 Windows x64 / Autodesk Maya 2025용 독립 NPR 라인 플러그인입니다.
 
-- 선택 가능한 화면 공간 GPU 고속 프리뷰: 리깅 조작용, 전체 표시 표면에 단일 스타일 적용
+- 선택 가능한 화면 공간 GPU 고속 프리뷰: 리깅 조작용, 라인셋에 등록한 오브젝트·재질에 단일 스타일 적용
 - GPU 실시간 뷰포트: 외곽선, 열린 에지, 하드 에지, 재질 경계, 교차선
 - CPU 최종 렌더, 라인셋, Merge Groups, Render Elements
 - PNG 알파·흑백 마스크 경계선, 내부 구멍, 메시 변형 및 스무스 대응
@@ -24,13 +24,13 @@ import reapencil_start
 reapencil_start.launch()
 ```
 
-Plug-in Manager의 기본 파일은 **reaPencil.py**입니다. Maya가 허용 여부를 물으면 설치한 파일과 경로를 직접 확인하세요. GPU 화면 표시용 **reaPencilDraw088.mll**은 메인 플러그인이 자동으로 불러오는 보조 모듈입니다.
+Plug-in Manager의 기본 파일은 **reaPencil.py**입니다. Maya가 허용 여부를 물으면 설치한 파일과 경로를 직접 확인하세요. GPU 화면 표시용 **reaPencilDraw090.mll**은 메인 플러그인이 자동으로 불러오는 보조 모듈입니다.
 
 ## 고속 프리뷰
 
-**ReaPencil → 고속 GPU 프리뷰 켜기**를 선택합니다. **고속 프리뷰 설정…**에서 굵기·색상을 조절합니다. 화면 깊이 기반의 근사 표시이며 개별 라인셋·재질 경계·숨은 선을 정확히 재현하지 않습니다. 기존 정밀 표시로 돌아가려면 **Enable live viewport lines (Precise)**를 선택하세요. 최종 렌더는 CPU 그대로입니다.
+**뷰포트 Renderer → ReaPencil Fast Preview**를 선택합니다. 정밀 표시는 **Renderer → ReaPencil Preview**, 끄기는 **Renderer → Viewport 2.0**입니다. **Renderer 목록의 ReaPencil Fast Preview 오른쪽 옵션 버튼**에서 굵기·색상을 조절합니다. ReaPencil Preview 오른쪽 옵션 버튼은 기존 렌더·라인 설정을 엽니다. 라인셋의 오브젝트·재질 대상을 반영합니다. 화면 깊이 기반의 교차선과 브러시 표현은 근사이며, 정밀 모드와 동일한 결과를 보장하지 않습니다. 기존 정밀 표시로 돌아가려면 **Renderer → ReaPencil Preview**를 선택하세요. 최종 렌더는 CPU 그대로입니다.
 
-이 옵션은 Viewport 2.0 OpenGL Core Profile을 사용하며 **reaPencilFast089.mll**을 자동으로 불러옵니다. 리깅 자체가 느리면 프리뷰를 바꿔도 그 평가 비용은 남습니다.
+이 옵션은 Viewport 2.0 OpenGL Core Profile을 사용하며 **reaPencilFast094.mll**을 자동으로 불러옵니다. 리깅 자체가 느리면 프리뷰를 바꿔도 그 평가 비용은 남습니다.
 
 ## 이후 업데이트
 
@@ -39,3 +39,11 @@ ReaPencil → **업데이트 확인…** → **다운로드 및 설치 예약**�
 현재 지원 플랫폼은 Windows x64 / Maya 2025입니다. 뷰포트에는 그래픽 드라이버의 OpenCL fp64 지원이 필요합니다. 최종 렌더는 CPU이며 CUDA Toolkit은 필요하지 않습니다. Maya 기본 NumPy를 교체하지 않습니다.
 
 설치본의 `CHECK.cmd`는 별도 프로세스에서 작은 테스트 장면으로 GPU·CPU 경로를 검사합니다. 자세한 업데이트 절차는 [docs/updates.md](docs/updates.md)를 확인하세요.
+
+## UI language and anti-aliasing
+
+Choose English or 한국어 in ReaPencil → ReaPencil Settings. The choice is saved in Maya preferences. The option button beside ReaPencil Fast Preview includes Off / FXAA anti-aliasing (FXAA is the default). Final CPU rendering uses the existing render settings.
+
+## Authored edge overlays
+
+Fast Preview options include Hard edges and Authored crease edges. Crease edges use Maya edge crease weights greater than zero, independent of face angle. Both switches are off by default and are saved with the preview preferences. The optional overlay reads deformed positions only for targeted meshes containing marked edges; its cost depends on edge and deformer counts. Line-set object/material targets, visibility, isolate and depth occlusion remain in effect.

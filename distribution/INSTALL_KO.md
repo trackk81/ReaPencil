@@ -1,4 +1,4 @@
-# ReaPencil 0.8.9 다른 PC 설치 및 테스트
+# ReaPencil 0.8.13 다른 PC 설치 및 테스트
 
 지원 대상: **Windows 64비트 / Maya 2025**. 다른 Maya 버전과 macOS/Linux용 바이너리는 포함하지 않습니다.
 
@@ -13,7 +13,7 @@ import reapencil_start
 reapencil_start.launch()
 ```
 
-플러그인 허용창에서는 `reaPencil.py`와 `reaPencilDraw088.mll` 등 설치한 ReaPencil 파일인지 확인하고 Allow를 선택하세요. 설치기는 Maya 보안 설정을 바꾸지 않습니다. Auto load는 메인 플러그인 `reaPencil.py`에만 설정하면 됩니다.
+플러그인 허용창에서는 `reaPencil.py`와 `reaPencilDraw090.mll` 등 설치한 ReaPencil 파일인지 확인하고 Allow를 선택하세요. 설치기는 Maya 보안 설정을 바꾸지 않습니다. Auto load는 메인 플러그인 `reaPencil.py`에만 설정하면 됩니다.
 
 Maya를 기본 경로에 설치하지 않았다면 명령 프롬프트에서 실제 mayapy 경로를 지정합니다.
 

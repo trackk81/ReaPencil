@@ -1,4 +1,5 @@
 """Native Maya line-set editor, independently implemented from observed workflow."""
+from .i18n import tr
 import os
 import json
 import traceback
@@ -18,7 +19,7 @@ def _safe(function, *args):
         return function(*args)
     except Exception as error:
         traceback.print_exc()
-        cmds.confirmDialog(title="ReaPencil", message=str(error), button=["OK"], icon="warning")
+        cmds.confirmDialog(title=tr("ReaPencil"), message=tr(str(error)), button=tr(["OK"]), icon="warning")
 
 
 def remove_menu():
@@ -35,36 +36,37 @@ def install_menu():
     # Deferred callbacks can arrive after unload.
     if not hasattr(cmds, "reaToonUI"):
         return
+    from . import preview_renderers
+    preview_renderers.register()
     remove_menu()
-    cmds.menu(MENU, label="ReaPencil", parent="MayaWindow", tearOff=True)
-    cmds.menuItem(label="Open Line Window", command=lambda *_: show())
+    cmds.menu(MENU, label=tr("ReaPencil"), parent="MayaWindow", tearOff=True)
+    cmds.menuItem(label=tr("Open Line Window"), command=lambda *_: show())
     from . import menu_actions
-    cmds.menuItem(label="Pencil+ 장면 가져오기 / 이전",command=lambda *_:_safe(menu_actions.import_pencil_scene))
-    cmds.menuItem(label="Add Selected Edges Node", command=lambda *_: _safe(menu_actions.add_selected_edges))
-    cmds.menuItem(label="Delete Unused ReaPencil Nodes", command=lambda *_: _safe(menu_actions.delete_unused))
-    cmds.menuItem(label="Add Render Settings Node",annotation="Enable Smooth Mesh and open scene render settings", command=lambda *_: _safe(menu_actions.add_render_settings))
+    cmds.menuItem(label=tr("Pencil+ 장면 가져오기 / 이전"),command=lambda *_:_safe(menu_actions.import_pencil_scene))
+    cmds.menuItem(label=tr("Add Selected Edges Node"), command=lambda *_: _safe(menu_actions.add_selected_edges))
+    cmds.menuItem(label=tr("Delete Unused ReaPencil Nodes"), command=lambda *_: _safe(menu_actions.delete_unused))
+    cmds.menuItem(label=tr("Add Render Settings Node"),annotation=tr("Enable Smooth Mesh and open scene render settings"), command=lambda *_: _safe(menu_actions.add_render_settings))
     from . import alpha_boundary
-    cmds.menuItem(label="Alpha Boundary / 알파 경계선",command=lambda *_:_safe(alpha_boundary.show))
+    cmds.menuItem(label=tr("Alpha Boundary"),command=lambda *_:_safe(alpha_boundary.show))
     cmds.menuItem(divider=True)
-    cmds.menuItem(label="Enable live viewport lines (Precise)", command=lambda *_: _safe(_viewport_on))
     from . import fast_viewport
-    cmds.menuItem(label="고속 GPU 프리뷰 켜기",annotation="Screen-space preview for all visible surfaces; CPU final rendering is unchanged",command=lambda *_:_safe(fast_viewport.enable))
-    cmds.menuItem(label="고속 프리뷰 설정…",command=lambda *_:_safe(fast_viewport.show))
-    cmds.menuItem(label="Disable live viewport lines", command=lambda *_: _safe(_viewport_off))
-    cmds.menuItem(label="Use ReaPencil in Render Settings", command=lambda *_: _safe(_select_renderer))
-    cmds.menuItem(label="Inspect Pencil+ compatibility", command=lambda *_: _safe(_pencil_import, True))
-    cmds.menuItem(label="Import Pencil+ settings", command=lambda *_: _safe(menu_actions.import_pencil_scene))
-    cmds.menuItem(label="Upgrade Existing ReaPencil Line Sets",command=lambda *_:_safe(_upgrade_legacy))
-    cmds.menuItem(label="Assign converted Maya materials", command=lambda *_: _safe(_pencil_import, False, True))
-    cmds.menuItem(label="Create toon material for selection", command=lambda *_: _safe(maya_scene.create_toon_material))
+    cmds.menuItem(label=tr("Use ReaPencil in Render Settings"), command=lambda *_: _safe(_select_renderer))
+    cmds.menuItem(label=tr("Inspect Pencil+ compatibility"), command=lambda *_: _safe(_pencil_import, True))
+    cmds.menuItem(label=tr("Import Pencil+ settings"), command=lambda *_: _safe(menu_actions.import_pencil_scene))
+    cmds.menuItem(label=tr("Upgrade Existing ReaPencil Line Sets"),command=lambda *_:_safe(_upgrade_legacy))
+    cmds.menuItem(label=tr("Assign converted Maya materials"), command=lambda *_: _safe(_pencil_import, False, True))
+    cmds.menuItem(label=tr("Create toon material for selection"), command=lambda *_: _safe(maya_scene.create_toon_material))
     cmds.menuItem(divider=True)
-    cmds.menuItem(label="Renderer / Advanced Settings", command=lambda *_: show_advanced())
+    cmds.menuItem(label=tr("Renderer / Advanced Settings"), command=lambda *_: show_advanced())
     cmds.menuItem(divider=True)
     def updates():
         from . import update_ui
         return update_ui.show()
-    cmds.menuItem(label="업데이트 확인…",command=lambda *_:_safe(updates))
-    cmds.menuItem(label="업데이트 설치…",command=lambda *_:_safe(updates))
+    cmds.menuItem(label=tr("업데이트 확인…"),command=lambda *_:_safe(updates))
+    cmds.menuItem(label=tr("업데이트 설치…"),command=lambda *_:_safe(updates))
+    from . import i18n
+    cmds.menuItem(divider=True)
+    cmds.menuItem(label=tr('ReaPencil Settings…'),command=lambda *_:i18n.show_settings())
     _menu_watcher=_AdjacentMenu()
 
 
@@ -250,9 +252,9 @@ def _pencil_import(inspect_only=False, bake=False):
         show()  # Do not let stale controls overwrite the imported settings.
     if cmds.window('revToonCompatibilityReport', exists=True):
         cmds.deleteUI('revToonCompatibilityReport')
-    cmds.window('revToonCompatibilityReport', title='Pencil+ import report', widthHeight=(650, 500))
+    cmds.window('revToonCompatibilityReport', title=tr('Pencil+ import report'), widthHeight=(650, 500))
     cmds.columnLayout(adjustableColumn=True)
-    cmds.text(label='Original Pencil+ nodes are preserved. See unsupported items below.', align='left')
+    cmds.text(label=tr('Original Pencil+ nodes are preserved. See unsupported items below.'), align='left')
     cmds.scrollField(editable=False, text=text, height=440, wordWrap=True)
     cmds.showWindow('revToonCompatibilityReport')
     return report
@@ -296,15 +298,15 @@ def _refresh_sets(selected=None):
     control = _controls['sets'][1]
     cmds.textScrollList(control, edit=True, removeAll=True)
     nodes = sorted(maya_scene._tagged('lineSet', 'objectSet'))
-    cmds.textScrollList(control, edit=True, append=['장면 기본값'] + nodes)
-    cmds.textScrollList(control, edit=True, selectItem=selected if selected in nodes else '장면 기본값')
+    cmds.textScrollList(control, edit=True, append=[tr('Scene defaults')] + nodes)
+    cmds.textScrollList(control, edit=True, selectItem=selected if selected in nodes else tr('Scene defaults'))
     _select_set()
 
 
 def _select_set(*_):
     global _editing_set
-    selected = cmds.textScrollList(_controls['sets'][1], query=True, selectItem=True) or ['장면 기본값']
-    _editing_set = None if selected[0] == '장면 기본값' else selected[0]
+    selected = cmds.textScrollList(_controls['sets'][1], query=True, selectItem=True) or [tr('Scene defaults')]
+    _editing_set = None if selected[0] == tr('Scene defaults') else selected[0]
     values = maya_scene.load_settings()
     if _editing_set:
         values.update(maya_scene._json_attr(_editing_set, 'reaToonOverrides'))
@@ -320,7 +322,7 @@ def _select_set(*_):
     cmds.textScrollList(_controls['members'][1], edit=True, removeAll=True)
     if members:
         cmds.textScrollList(_controls['members'][1], edit=True, append=members)
-    cmds.text(_controls['editing'][1], edit=True, label='편집 대상: ' + (_editing_set or '장면 기본값'))
+    cmds.text(_controls['editing'][1], edit=True, label=tr('편집 대상: ' + (_editing_set or tr('Scene defaults'))))
 
 
 def _membership(action):
@@ -352,17 +354,17 @@ def _membership(action):
 def _field(key, label, values):
     value = values[key]
     if isinstance(value, bool):
-        _controls[key] = ('bool', cmds.checkBox(label=label, value=value))
+        _controls[key] = ('bool', cmds.checkBox(label=tr(label), value=value))
     elif isinstance(value, (list, tuple)):
-        _controls[key] = ('color', cmds.colorSliderGrp(label=label, rgbValue=value))
+        _controls[key] = ('color', cmds.colorSliderGrp(label=tr(label), rgbValue=value))
     elif isinstance(value, int):
-        _controls[key] = ('int', cmds.intFieldGrp(label=label, numberOfFields=1, value1=value))
+        _controls[key] = ('int', cmds.intFieldGrp(label=tr(label), numberOfFields=1, value1=value))
     else:
-        _controls[key] = ('float', cmds.floatFieldGrp(label=label, numberOfFields=1, value1=value, precision=3))
+        _controls[key] = ('float', cmds.floatFieldGrp(label=tr(label), numberOfFields=1, value1=value, precision=3))
 
 
 def _frame(label, collapsed=False):
-    frame = cmds.frameLayout(label=label, collapsable=True, collapse=collapsed, marginWidth=8, marginHeight=6)
+    frame = cmds.frameLayout(label=tr(label), collapsable=True, collapse=collapsed, marginWidth=8, marginHeight=6)
     cmds.columnLayout(adjustableColumn=True, rowSpacing=5)
     return frame
 
@@ -377,40 +379,40 @@ def show_advanced():
     close()
     _editing_set = None
     values = maya_scene.load_settings()
-    cmds.window(WINDOW, title='ReaPencil — Renderer / Advanced Settings', widthHeight=(680, 860), sizeable=True)
+    cmds.window(WINDOW, title=tr('ReaPencil — Renderer / Advanced Settings'), widthHeight=(680, 860), sizeable=True)
     cmds.scrollLayout(childResizable=True)
     cmds.columnLayout(adjustableColumn=True, rowSpacing=7)
-    cmds.text(label='ReaPencil  |  CPU 렌더 설정 · 이전 objectSet 작업 편집', align='left', height=26)
-    cmds.button(label='Line Window / Attribute Editor 열기',command=lambda *_:show())
+    cmds.text(label=tr('ReaPencil  |  CPU 렌더 설정 · 이전 objectSet 작업 편집'), align='left', height=26)
+    cmds.button(label=tr('Line Window / Attribute Editor 열기'),command=lambda *_:show())
     cmds.rowLayout(numberOfColumns=3, adjustableColumn=1)
-    cmds.button(label='뷰포트 라인 켜기', command=lambda *_: _safe(_viewport_on))
-    cmds.button(label='끄기', command=lambda *_: _safe(_viewport_off))
-    cmds.button(label='Maya 렌더러로 선택', command=lambda *_: _safe(_select_renderer))
+    cmds.button(label=tr('뷰포트 라인 켜기'), command=lambda *_: _safe(_viewport_on))
+    cmds.button(label=tr('끄기'), command=lambda *_: _safe(_viewport_off))
+    cmds.button(label=tr('Maya 렌더러로 선택'), command=lambda *_: _safe(_select_renderer))
     cmds.setParent('..')
     _frame('장면 렌더 기본 설정')
-    cmds.text(label='새 Line별 설정과 Objects / Materials 대상은 Attribute Editor에서 편집합니다.', align='left')
+    cmds.text(label=tr('새 Line별 설정과 Objects / Materials 대상은 Attribute Editor에서 편집합니다.'), align='left')
     for key,label in [('supersample','오버샘플링 (1–4)'),('seed','난수 시드')]:
         _field(key,label,values)
     _end_frame()
     _frame('이전 버전 objectSet 라인셋 · Legacy',collapsed=True)
     cmds.rowLayout(numberOfColumns=2, adjustableColumn=2)
     cmds.columnLayout(adjustableColumn=True, width=240)
-    cmds.text(label='라인셋 목록', align='left')
+    cmds.text(label=tr('라인셋 목록'), align='left')
     _controls['sets'] = ('list', cmds.textScrollList(height=140, allowMultiSelection=False, selectCommand=lambda *_: _safe(_select_set)))
-    cmds.button(label='선택한 오브젝트 / 에지로 새 라인셋', command=lambda *_: _safe(_line_set))
-    cmds.button(label='목록 새로 고침', command=lambda *_: _safe(_refresh_sets))
+    cmds.button(label=tr('선택한 오브젝트 / 에지로 새 라인셋'), command=lambda *_: _safe(_line_set))
+    cmds.button(label=tr('목록 새로 고침'), command=lambda *_: _safe(_refresh_sets))
     cmds.setParent('..')
     cmds.columnLayout(adjustableColumn=True)
-    cmds.text(label='선택 라인셋의 오브젝트 / 에지', align='left')
+    cmds.text(label=tr('선택 라인셋의 오브젝트 / 에지'), align='left')
     _controls['members'] = ('list', cmds.textScrollList(height=140, allowMultiSelection=True))
     cmds.rowLayout(numberOfColumns=3, adjustableColumn=1)
-    cmds.button(label='현재 선택 추가', command=lambda *_: _safe(_membership,'add'))
-    cmds.button(label='목록 항목 제외', command=lambda *_: _safe(_membership,'remove'))
-    cmds.button(label='장면에서 선택', command=lambda *_: _safe(_membership,'select'))
+    cmds.button(label=tr('현재 선택 추가'), command=lambda *_: _safe(_membership,'add'))
+    cmds.button(label=tr('목록 항목 제외'), command=lambda *_: _safe(_membership,'remove'))
+    cmds.button(label=tr('장면에서 선택'), command=lambda *_: _safe(_membership,'select'))
     cmds.setParent('..'); cmds.setParent('..'); cmds.setParent('..')
-    cmds.text(label='이 목록은 0.5 이전 objectSet 방식만 편집합니다. 새 Line 노드가 있으면 AE의 LineSet 순서와 Objects / Materials 대상이 적용됩니다.\n이전 방식에서는 이름순 마지막 셋이 우선합니다.', align='left', wordWrap=True, height=38)
+    cmds.text(label=tr('이 목록은 0.5 이전 objectSet 방식만 편집합니다. 새 Line 노드가 있으면 AE의 LineSet 순서와 Objects / Materials 대상이 적용됩니다.\n이전 방식에서는 이름순 마지막 셋이 우선합니다.'), align='left', wordWrap=True, height=38)
     _end_frame()
-    _controls['editing'] = ('label', cmds.text(label='편집 대상: 장면 기본값', align='left', height=25))
+    _controls['editing'] = ('label', cmds.text(label=tr('편집 대상: 장면 기본값'), align='left', height=25))
     tabs = cmds.tabLayout(innerMarginWidth=8, innerMarginHeight=8)
     visible = cmds.columnLayout(adjustableColumn=True, rowSpacing=5)
     _frame('선 종류 · Edge detection')
@@ -426,46 +428,46 @@ def show_advanced():
     hidden = cmds.columnLayout(adjustableColumn=True, rowSpacing=6)
     _field('hidden_lines','은선 표시',values)
     _field('hidden_color','은선 색',values)
-    cmds.text(label='은선의 선 종류와 두께는 가시선 설정을 공유합니다.\nPencil+의 독립 은선 브러시·종류별 브러시는 아직 지원하지 않습니다.', align='left', wordWrap=True, height=48)
+    cmds.text(label=tr('은선의 선 종류와 두께는 가시선 설정을 공유합니다.\nPencil+의 독립 은선 브러시·종류별 브러시는 아직 지원하지 않습니다.'), align='left', wordWrap=True, height=48)
     cmds.setParent('..')
     brush = cmds.columnLayout(adjustableColumn=True, rowSpacing=6)
     for key,label in [('distance_reduction','거리별 두께 감소'),('width_variation','두께 변화 (0–1)'),('taper','에지 끝 가늘게 (0–1)'),('dash_length','점선 길이 (픽셀)')]:
         _field(key,label,values)
-    cmds.text(label='위 항목은 ReaPencil의 간소화된 스트로크 기능입니다.\n브러시 이미지·텍스처 맵·혼합 모드·원본 감소 곡선은 지원하지 않습니다.', align='left', wordWrap=True, height=48)
+    cmds.text(label=tr('위 항목은 ReaPencil의 간소화된 스트로크 기능입니다.\n브러시 이미지·텍스처 맵·혼합 모드·원본 감소 곡선은 지원하지 않습니다.'), align='left', wordWrap=True, height=48)
     cmds.setParent('..')
-    cmds.tabLayout(tabs, edit=True, tabLabel=((visible,'가시선 · Visible'),(hidden,'은선 · Hidden'),(brush,'브러시 상세 · Detail')))
+    cmds.tabLayout(tabs, edit=True, tabLabel=tr(((visible,'가시선 · Visible'),(hidden,'은선 · Hidden'),(brush,'브러시 상세 · Detail'))))
     cmds.setParent('..')
-    cmds.button(label='현재 편집 대상에 적용 · 장면에 저장', height=32, command=lambda *_: _safe(_save))
+    cmds.button(label=tr('현재 편집 대상에 적용 · 장면에 저장'), height=32, command=lambda *_: _safe(_save))
     _frame('재질 · Material', True)
-    cmds.button(label='선택에 툰 재질 생성 / 할당', command=lambda *_: _safe(_material))
-    cmds.text(label='재질 색·임계값은 Attribute Editor에서 편집합니다. 텍스처와 그림자는 미지원입니다.', align='left', wordWrap=True)
+    cmds.button(label=tr('선택에 툰 재질 생성 / 할당'), command=lambda *_: _safe(_material))
+    cmds.text(label=tr('재질 색·임계값은 Attribute Editor에서 편집합니다. 텍스처와 그림자는 미지원입니다.'), align='left', wordWrap=True)
     _end_frame()
     _frame('Pencil+ 기존 장면 가져오기', True)
-    cmds.button(label='변환 가능 항목 분석', command=lambda *_: _safe(_pencil_import,True))
-    cmds.button(label='설정 가져오기 · 원본 노드 보존', command=lambda *_: _safe(_pencil_import,False))
-    cmds.button(label='Maya 램프 재질로 명시적으로 할당 전환', command=lambda *_: _safe(_pencil_import,False,True))
-    cmds.text(label='현재 프레임 스냅샷입니다. 미지원 항목은 보고서에 표시됩니다. PLD는 미지원입니다.', align='left', wordWrap=True)
+    cmds.button(label=tr('변환 가능 항목 분석'), command=lambda *_: _safe(_pencil_import,True))
+    cmds.button(label=tr('설정 가져오기 · 원본 노드 보존'), command=lambda *_: _safe(_pencil_import,False))
+    cmds.button(label=tr('Maya 램프 재질로 명시적으로 할당 전환'), command=lambda *_: _safe(_pencil_import,False,True))
+    cmds.text(label=tr('현재 프레임 스냅샷입니다. 미지원 항목은 보고서에 표시됩니다. PLD는 미지원입니다.'), align='left', wordWrap=True)
     _end_frame()
     _frame('렌더 / 출력 · Render', True)
-    _controls['camera'] = ('camera',cmds.optionMenuGrp(label='카메라'))
+    _controls['camera'] = ('camera',cmds.optionMenuGrp(label=tr('카메라')))
     cameras=maya_scene.camera_names()
     for name in cameras:
         cmds.menuItem(label=name)
     if cameras:
         active=next((c for c in cameras if cmds.getAttr(c+'.renderable')),cameras[0])
         cmds.optionMenuGrp(_controls['camera'][1],edit=True,value=active)
-    cmds.text(label='라인 전용 출력 · 투명 배경 · 오브젝트 면 색상 제외',align='left')
+    cmds.text(label=tr('라인 전용 출력 · 투명 배경 · 오브젝트 면 색상 제외'),align='left')
     for key,label in [('width','출력 너비'),('height','출력 높이'),('depth_bias','깊이 오차 보정')]:
         _field(key,label,values)
     output=os.path.join(cmds.workspace(query=True,rootDirectory=True),'images','revtoon')
-    _controls['output']=('output',cmds.textFieldButtonGrp(label='출력 경로 접두사',buttonLabel='찾기',text=output,buttonCommand=_browse))
-    cmds.button(label='Maya 렌더 설정으로 현재 프레임 렌더',command=lambda *_: _safe(_maya_render))
-    cmds.button(label='위 출력 경로에 렌더 · 같은 이름 파일 교체',command=lambda *_: _safe(_render))
+    _controls['output']=('output',cmds.textFieldButtonGrp(label=tr('출력 경로 접두사'),buttonLabel=tr('찾기'),text=output,buttonCommand=_browse))
+    cmds.button(label=tr('Maya 렌더 설정으로 현재 프레임 렌더'),command=lambda *_: _safe(_maya_render))
+    cmds.button(label=tr('위 출력 경로에 렌더 · 같은 이름 파일 교체'),command=lambda *_: _safe(_render))
     cmds.rowLayout(numberOfColumns=2,adjustableColumn=1)
-    cmds.button(label='프리셋 내보내기',command=lambda *_: _safe(_preset,True))
-    cmds.button(label='프리셋 가져오기',command=lambda *_: _safe(_preset,False))
+    cmds.button(label=tr('프리셋 내보내기'),command=lambda *_: _safe(_preset,True))
+    cmds.button(label=tr('프리셋 가져오기'),command=lambda *_: _safe(_preset,False))
     cmds.setParent('..')
     _end_frame()
-    _controls['status']=('status',cmds.scrollField(editable=False,height=65,wordWrap=True,text='준비됨 · 선택한 라인셋의 값을 편집한 뒤 적용하세요.'))
+    _controls['status']=('status',cmds.scrollField(editable=False,height=65,wordWrap=True,text=tr('준비됨 · 선택한 라인셋의 값을 편집한 뒤 적용하세요.')))
     _refresh_sets()
     cmds.showWindow(WINDOW)

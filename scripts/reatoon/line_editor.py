@@ -1,4 +1,5 @@
 """Independent native Maya Line-list and Attribute Editor workflow."""
+from .i18n import tr
 from maya import cmds, mel
 from . import line_graph as graph, maya_scene
 
@@ -180,7 +181,7 @@ def show():
     _window = QtWidgets.QDialog(main)
     _window.finished.connect(_release_pin)
     _window.setObjectName(WINDOW)
-    _window.setWindowTitle('ReaPencil Line')
+    _window.setWindowTitle(tr('ReaPencil Line'))
     _window.setWindowFlags(QtCore.Qt.Window)
     _window.resize(440, 440)
     _window.setMinimumWidth(430)
@@ -194,7 +195,7 @@ def show():
     _list = QtWidgets.QListWidget()
     _list.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
     _list.setEditTriggers(QtWidgets.QAbstractItemView.DoubleClicked|QtWidgets.QAbstractItemView.EditKeyPressed)
-    _list.setToolTip('Click to edit without changing Maya selection. Double-click or F2 to rename.')
+    _list.setToolTip(tr('Click to edit without changing Maya selection. Double-click or F2 to rename.'))
     _list.setAlternatingRowColors(False)
     _list.setStyleSheet('QListWidget::item:selected { background: #527f9c; color: white; }')
     _list.itemSelectionChanged.connect(_line_selection)
@@ -203,13 +204,13 @@ def show():
     body.addWidget(_list, 1)
     row = QtWidgets.QHBoxLayout()
     for text, callback in [('Add Line', _new_line), ('Delete', _delete_selected), ('Refresh', refresh)]:
-        button = QtWidgets.QPushButton(text)
+        button = QtWidgets.QPushButton(tr(text))
         button.setObjectName({'Add Line':'revToonAddLine','Delete':'revToonDeleteLine','Refresh':'revToonRefreshLines'}[text])
         button.clicked.connect(lambda checked=False, fn=callback: _safe(fn))
         row.addWidget(button)
     body.addLayout(row)
     priority_row = QtWidgets.QHBoxLayout()
-    priority_row.addWidget(QtWidgets.QLabel('Render Priority'))
+    priority_row.addWidget(QtWidgets.QLabel(tr('Render Priority')))
     _priority_spin = QtWidgets.QSpinBox()
     _priority_spin.setRange(0, 99)
     _priority_spin.setFixedWidth(48)
@@ -220,16 +221,16 @@ def show():
     priority_row.addWidget(_priority_spin)
     priority_row.addWidget(_priority_slider, 1)
     body.addLayout(priority_row)
-    tabs.addTab(page, 'ReaPencil Line')
+    tabs.addTab(page, tr('ReaPencil Line'))
     from . import line_aux_ui
     global _aux_refresh
     _aux_refresh = line_aux_ui.add_tabs(tabs)
     layout.addWidget(tabs)
-    import_button = QtWidgets.QPushButton('Pencil+ 장면 가져오기 / 이전')
+    import_button = QtWidgets.QPushButton(tr('Pencil+ 장면 가져오기 / 이전'))
     from . import menu_actions
     import_button.clicked.connect(lambda *_:_safe(menu_actions.import_pencil_scene))
     layout.addWidget(import_button)
-    layout.addWidget(QtWidgets.QLabel('메시 선택을 유지합니다. Objects +로 바로 추가할 수 있습니다.'))
+    layout.addWidget(QtWidgets.QLabel(tr('메시 선택을 유지합니다. Objects +로 바로 추가할 수 있습니다.')))
     _window.show()
     if _name_job is None:_name_job=cmds.scriptJob(event=('NameChanged',_names_changed))
     refresh()
@@ -293,7 +294,7 @@ def _set_changed(ctx):
         cmds.deleteUI(child)
     cmds.setParent(ctx['detail'])
     if not selected:
-        cmds.text(label='Add a Line Set to edit its targets and brush.', align='left')
+        cmds.text(label=tr('Add a Line Set to edit its targets and brush.'), align='left')
         return
     node = selected[0]
     targets = graph.get_targets(node)
@@ -303,11 +304,11 @@ def _set_changed(ctx):
     values = dict(maya_scene.DEFAULT_SETTINGS)
     values.update(graph.get_settings(ctx['node']))
     values.update(graph.get_settings(node))
-    name_control=cmds.textFieldGrp(label='Line Set Name', text=node)
+    name_control=cmds.textFieldGrp(label=tr('Line Set Name'), text=node)
     ctx['set_name']=name_control
     cmds.textFieldGrp(name_control,edit=True,
                      changeCommand=lambda *_:_defer_rename_set(ctx,node,cmds.textFieldGrp(name_control,query=True,text=True)))
-    cmds.checkBox(label='On', value=_active(node), changeCommand=lambda value: _safe(graph.set_active, node, value))
+    cmds.checkBox(label=tr('On'), value=_active(node), changeCommand=lambda value: _safe(graph.set_active, node, value))
     _field(node,'lineset_id','Line Set ID (1–8)',values)
     tabs = cmds.tabLayout(innerMarginWidth=6, innerMarginHeight=5)
     visible = cmds.columnLayout(adjustableColumn=True)
@@ -317,36 +318,36 @@ def _set_changed(ctx):
     hidden = cmds.columnLayout(adjustableColumn=True)
     _field(node, 'hidden_lines', 'Draw hidden lines', values)
     _field(node, 'hidden_color', 'Hidden color', values)
-    cmds.text(label='Hidden lines use the same edge types and width.\nVP2 uses a dashed x-ray preview.', align='left')
+    cmds.text(label=tr('Hidden lines use the same edge types and width.\nVP2 uses a dashed x-ray preview.'), align='left')
     cmds.setParent(tabs)
     detail = cmds.columnLayout(adjustableColumn=True)
     for key, label in [('distance_reduction','Distance reduction'),('width_variation','Width variation'),
                        ('taper','Taper'),('dash_length','Dash length')]:
         _field(node, key, label, values)
-    cmds.text(label='Taper and variation are supported by offline rendering.\nVP2 shows constant width per edge.', align='left')
+    cmds.text(label=tr('Taper and variation are supported by offline rendering.\nVP2 shows constant width per edge.'), align='left')
     cmds.setParent(tabs)
-    cmds.tabLayout(tabs, edit=True, tabLabel=[(visible,'Visible Lines'),(hidden,'Hidden Lines'),(detail,'Brush Details')])
+    cmds.tabLayout(tabs, edit=True, tabLabel=tr([(visible,'Visible Lines'),(hidden,'Hidden Lines'),(detail,'Brush Details')]))
 
 
 def _field(node, key, label, values):
     value = values[key]
     if isinstance(maya_scene.DEFAULT_SETTINGS[key], bool):
-        cmds.checkBox(label=label, value=value, changeCommand=lambda v: _safe(_setting,node,key,v))
+        cmds.checkBox(label=tr(label), value=value, changeCommand=lambda v: _safe(_setting,node,key,v))
     elif isinstance(value, (list, tuple)):
-        control = cmds.colorSliderGrp(label=label, rgbValue=value)
+        control = cmds.colorSliderGrp(label=tr(label), rgbValue=value)
         callback=lambda *_: _safe(_setting,node,key,cmds.colorSliderGrp(control,query=True,rgbValue=True))
         cmds.colorSliderGrp(control, edit=True, changeCommand=callback,dragCommand=callback)
     elif isinstance(maya_scene.DEFAULT_SETTINGS[key], int):
-        control = cmds.intFieldGrp(label=label, numberOfFields=1, value1=value)
+        control = cmds.intFieldGrp(label=tr(label), numberOfFields=1, value1=value)
         cmds.intFieldGrp(control, edit=True, changeCommand=lambda *_: _safe(_setting,node,key,cmds.intFieldGrp(control,query=True,value1=True)))
     else:
-        control = cmds.floatFieldGrp(label=label, numberOfFields=1, value1=value, precision=3)
+        control = cmds.floatFieldGrp(label=tr(label), numberOfFields=1, value1=value, precision=3)
         callback=lambda *_: _safe(_setting,node,key,cmds.floatFieldGrp(control,query=True,value1=True))
         cmds.floatFieldGrp(control, edit=True, changeCommand=callback,dragCommand=callback)
 
 
 def _feature_fields(node, values):
-    frame = cmds.frameLayout(label='Line Types', collapsable=True, collapse=False)
+    frame = cmds.frameLayout(label=tr('Line Types'), collapsable=True, collapse=False)
     cmds.columnLayout(adjustableColumn=True)
     for key, label in [('outline','Outline'),('open_edges','Open edges'),('intersections','Object intersections'),
                        ('self_intersections','Self intersections'),('hard_edges','Hard edges'),
@@ -359,7 +360,7 @@ def _feature_fields(node, values):
 
 
 def _brush_fields(node, values):
-    frame = cmds.frameLayout(label='Brush', collapsable=True, collapse=False)
+    frame = cmds.frameLayout(label=tr('Brush'), collapsable=True, collapse=False)
     cmds.columnLayout(adjustableColumn=True)
     _field(node,'line_color','Color',values)
     _field(node,'line_width','Size (pixels)',values)
@@ -383,8 +384,8 @@ def _defer_rename_set(ctx,node,value):
 
 def _prompt_rename_set(ctx):
     node=_selected_set(ctx)
-    answer=cmds.promptDialog(title='Rename Line Set',message='Name',text=node,button=['Rename','Cancel'],defaultButton='Rename',cancelButton='Cancel',dismissString='Cancel')
-    if answer=='Rename':return _defer_rename_set(ctx,node,cmds.promptDialog(query=True,text=True))
+    answer=cmds.promptDialog(title=tr('Rename Line Set'),message=tr('Name'),text=node,button=tr(['Rename','Cancel']),defaultButton=tr('Rename'),cancelButton=tr('Cancel'),dismissString=tr('Cancel'))
+    if answer==tr('Rename'):return _defer_rename_set(ctx,node,cmds.promptDialog(query=True,text=True))
 
 
 def _add_set(ctx):
@@ -439,10 +440,10 @@ def _add_selected(ctx,kind):
 
 def _chooser(ctx, kind):
     target = _selected_set(ctx)
-    window = cmds.window(title='Add ' + ('Objects' if kind=='objects' else 'Materials'), widthHeight=(420,440))
+    window = cmds.window(title=tr('Add ' + ('Objects' if kind=='objects' else 'Materials')), widthHeight=(420,440))
     cmds.columnLayout(adjustableColumn=True)
     filter_control = cmds.textField(placeholderText='Filter by name')
-    selected_only = cmds.checkBox(label='Current Maya selection only', value=False)
+    selected_only = cmds.checkBox(label=tr('Current Maya selection only'), value=False)
     listing = cmds.textScrollList(allowMultiSelection=True,height=320)
     def populate(*_):
         query = cmds.textField(filter_control,query=True,text=True).lower()
@@ -474,7 +475,7 @@ def _chooser(ctx, kind):
             _refresh(current[-1],target)
     cmds.textField(filter_control,edit=True,textChangedCommand=populate)
     cmds.checkBox(selected_only,edit=True,changeCommand=populate)
-    cmds.button(label='Add selected',command=lambda *_:_safe(accept))
+    cmds.button(label=tr('Add selected'),command=lambda *_:_safe(accept))
     populate()
     cmds.showWindow(window)
     from maya import OpenMayaUI
@@ -517,8 +518,8 @@ def ae_replace(plug):
 
 def _build_ae(ctx):
     node = _node(ctx)
-    active_control = cmds.checkBox(label='Active',value=_active(node),changeCommand=lambda v:_safe(graph.set_active,node,v))
-    priority_control = cmds.intSliderGrp(label='Render Priority',field=True,minValue=0,maxValue=99,
+    active_control = cmds.checkBox(label=tr('Active'),value=_active(node),changeCommand=lambda v:_safe(graph.set_active,node,v))
+    priority_control = cmds.intSliderGrp(label=tr('Render Priority'),field=True,minValue=0,maxValue=99,
                      value=cmds.getAttr(node+'.renderPriority'),changeCommand=lambda v:_safe(_priority,node,v))
     cmds.connectControl(active_control,node+'.active')
     cmds.connectControl(priority_control,node+'.renderPriority')
@@ -526,41 +527,41 @@ def _build_ae(ctx):
     for index,(key,label) in enumerate([('sets','Line Sets'),('objects','Objects'),('shaders','Materials')]):
         cmds.setParent(form)
         column = cmds.columnLayout(adjustableColumn=True,width=120)
-        cmds.text(label=label,align='left')
+        cmds.text(label=tr(label),align='left')
         ctx[key] = cmds.textScrollList(allowMultiSelection=key!='sets',height=164,width=120,
             selectCommand=(lambda *_:_safe(_set_changed,ctx)) if key=='sets' else lambda *_:None)
         if key=='sets':cmds.textScrollList(ctx[key],edit=True,doubleClickCommand=lambda *_:_safe(_prompt_rename_set,ctx))
         count = 4 if key=='sets' else 2
         row = cmds.rowLayout(numberOfColumns=count,adjustableColumn=1,
                              columnWidth=[(i+1,26) for i in range(count)])
-        ctx['add_'+key] = cmds.button(label='+',width=26,annotation='Add selected '+label+' (right-click to browse)',command=(lambda *_:_safe(_add_set,ctx)) if key=='sets' else lambda _,k=key:_safe(_add_selected,ctx,k))
+        ctx['add_'+key] = cmds.button(label=tr('+'),width=26,annotation=tr('Add selected '+label+' (right-click to browse)'),command=(lambda *_:_safe(_add_set,ctx)) if key=='sets' else lambda _,k=key:_safe(_add_selected,ctx,k))
         if key!='sets':
-            popup=cmds.popupMenu(parent=ctx['add_'+key],button=3)
-            cmds.menuItem(label='Browse '+label+'…',parent=popup,command=lambda _,k=key:_safe(_chooser,ctx,k))
-        ctx['remove_'+key] = cmds.button(label='−',width=26,annotation='Remove selected',command=(lambda *_:_safe(_remove_set,ctx)) if key=='sets' else lambda _,k=key:_safe(_remove_targets,ctx,k))
+            popup=cmds.popupMenu(parent=ctx['add_'+key],button=tr(3))
+            cmds.menuItem(label=tr('Browse '+label+'…'),parent=popup,command=lambda _,k=key:_safe(_chooser,ctx,k))
+        ctx['remove_'+key] = cmds.button(label=tr('−'),width=26,annotation=tr('Remove selected'),command=(lambda *_:_safe(_remove_set,ctx)) if key=='sets' else lambda _,k=key:_safe(_remove_targets,ctx,k))
         if key=='sets':
-            ctx['move_up'] = cmds.button(label='↑',width=26,command=lambda *_:_safe(_reorder,ctx,-1))
-            ctx['move_down'] = cmds.button(label='↓',width=26,command=lambda *_:_safe(_reorder,ctx,1))
+            ctx['move_up'] = cmds.button(label=tr('↑'),width=26,command=lambda *_:_safe(_reorder,ctx,-1))
+            ctx['move_down'] = cmds.button(label=tr('↓'),width=26,command=lambda *_:_safe(_reorder,ctx,1))
         cmds.formLayout(form,edit=True,attachForm=[(column,'top',2),(column,'bottom',2)],
             attachPosition=[(column,'left',2,index*100),(column,'right',2,(index+1)*100)])
     cmds.setParent(ctx['root'])
-    frame = cmds.frameLayout(label='Line Size',collapsable=True,collapse=False)
+    frame = cmds.frameLayout(label=tr('Line Size'),collapsable=True,collapse=False)
     cmds.columnLayout(adjustableColumn=True)
-    cmds.radioButtonGrp(numberOfRadioButtons=2,labelArray2=['Absolute (pixels)','Relative (unsupported)'],select=1,enable2=False)
+    cmds.radioButtonGrp(numberOfRadioButtons=2,labelArray2=tr(['Absolute (pixels)','Relative (unsupported)']),select=1,enable2=False)
     cmds.setParent(ctx['root'])
-    frame = cmds.frameLayout(label='Others',collapsable=True,collapse=True)
+    frame = cmds.frameLayout(label=tr('Others'),collapsable=True,collapse=True)
     cmds.columnLayout(adjustableColumn=True)
     values = dict(maya_scene.DEFAULT_SETTINGS,**graph.get_settings(node))
-    sampling = cmds.intFieldGrp(label='Over Sampling (scene)',numberOfFields=1,
+    sampling = cmds.intFieldGrp(label=tr('Over Sampling (scene)'),numberOfFields=1,
                                value1=maya_scene.load_settings()['supersample'])
     cmds.intFieldGrp(sampling,edit=True,changeCommand=lambda *_:_safe(_scene_setting,'supersample',
         cmds.intFieldGrp(sampling,query=True,value1=True)))
     _field(node,'seed','Random Seed',values)
-    output_control=cmds.checkBox(label='Output to Render Elements Only',value=cmds.getAttr(node+'.outputToRE'))
+    output_control=cmds.checkBox(label=tr('Output to Render Elements Only'),value=cmds.getAttr(node+'.outputToRE'))
     cmds.connectControl(output_control,node+'.outputToRE')
-    cmds.floatFieldGrp(label='Offscreen distance (unsupported)',numberOfFields=1,value1=0,enable=False)
+    cmds.floatFieldGrp(label=tr('Offscreen distance (unsupported)'),numberOfFields=1,value1=0,enable=False)
     cmds.setParent(ctx['root'])
-    frame = cmds.frameLayout(label='Line Set',collapsable=True,collapse=False)
+    frame = cmds.frameLayout(label=tr('Line Set'),collapsable=True,collapse=False)
     ctx['detail'] = cmds.columnLayout(adjustableColumn=True)
     _refresh(ctx)
 

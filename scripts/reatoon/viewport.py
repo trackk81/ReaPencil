@@ -61,7 +61,10 @@ _geometry_dirty_objects=set()
 _smooth_rebuild_only=False
 
 
+_fast_target_revision=0
 def request_refresh(graph_changed=False,style_changed=False):
+    global _fast_target_revision
+    if graph_changed or style_changed:_fast_target_revision+=1
     """Coalesce editor/DG changes; never redraw inside a DG deletion callback."""
     global _refresh_pending,_gpu_graph_dirty,_gpu_style_dirty
     _gpu_graph_dirty |= graph_changed;_gpu_style_dirty |= style_changed
@@ -74,7 +77,8 @@ def request_refresh(graph_changed=False,style_changed=False):
         _refresh_pending=False
         if _exiting or not _registered:return
         nodes=cmds.ls(type=NODE_NAME,long=True) or []
-        if any(cmds.getAttr(n+'.linePreviewEnabled') for n in nodes):cmds.refresh(force=True)
+        from . import fast_viewport
+        if any(cmds.getAttr(n+'.linePreviewEnabled') for n in nodes) or (fast_viewport._library is not None and fast_viewport.status()['enabled']):cmds.refresh(force=True)
     utils.executeDeferred(redraw)
 
 
@@ -86,6 +90,8 @@ def _invalidate(*_):
 
 
 def _scene_changed(*_):
+    global _fast_target_revision
+    _fast_target_revision+=1
     global _watchers_stale, _gpu_rebuild, _gpu_graph_dirty,_smooth_rebuild_only
     _smooth_rebuild_only=False
     _watchers_stale = True
@@ -142,6 +148,8 @@ def _attribute_changed(message, *args):
 
 
 def _targets_changed(*_):
+    global _fast_target_revision
+    _fast_target_revision+=1
     # Maya set membership edits do not reliably emit attributeChanged.
     # Rebuild material-boundary metadata as well as the per-face target map.
     global _gpu_rebuild,_gpu_graph_dirty,_smooth_rebuild_only
@@ -153,7 +161,7 @@ def _targets_changed(*_):
     _gpu_rebuild=True
     _smooth_rebuild_only=False
     _gpu_graph_dirty=True
-    _invalidate()
+    request_refresh(graph_changed=True)
 
 
 def _remove_callbacks(callbacks):
@@ -670,7 +678,8 @@ def register(plugin_fn):
     global _registered, _native_lib, _native_plugin, _retained_native, DRAW_CLASSIFICATION
     from pathlib import Path
     native_dir=Path(__file__).resolve().parents[2]/'plug-ins'/cmds.about(version=True)
-    retained=native_dir/'reaPencilDraw088.mll'
+    retained=native_dir/'reaPencilDraw090.mll'
+    if not retained.is_file():retained=native_dir/'reaPencilDraw088.mll'
     if not retained.is_file():retained=native_dir/'reaPencilDraw087.mll'
     if not retained.is_file():retained=native_dir/'reaPencilDraw084.mll'
     native_enabled=(os.environ.get('REVTOON_VIEWPORT_BACKEND','gpu')!='cpu' and os.environ.get('REVTOON_NATIVE_DRAW','1')!='0')
@@ -684,8 +693,8 @@ def register(plugin_fn):
         if (native.is_file() and os.environ.get('REVTOON_VIEWPORT_BACKEND','gpu')!='cpu'
                 and os.environ.get('REVTOON_NATIVE_DRAW','1')!='0'):
             import ctypes as c
-            if native.stem in ('reaPencilDraw087','reaPencilDraw088'):
-                for previous in ('reaPencilDraw084','reaPencilDraw087'):
+            if native.stem in ('reaPencilDraw087','reaPencilDraw088','reaPencilDraw090'):
+                for previous in ('reaPencilDraw084','reaPencilDraw087','reaPencilDraw088'):
                     if previous==native.stem:continue
                     if cmds.pluginInfo(previous,q=True,registered=True) and cmds.pluginInfo(previous,q=True,loaded=True):
                         if not cmds.pluginInfo(previous,q=True,unloadOk=True):raise RuntimeError('Restart Maya to update the GPU viewport module.')
@@ -752,10 +761,13 @@ def unregister(plugin_fn):
         _gpu_scene=None
 
 
-def enable():
+def enable(_from_renderer=False):
     """Create one tiny helper locator, preserving the user's selection."""
     from . import fast_viewport
-    fast_viewport.disable()
+    if not _from_renderer:
+        fast_viewport.disable()
+        from . import preview_renderers
+        preview_renderers.select_precise()
     if not _registered:
         raise RuntimeError("RevToon viewport node is not registered; load the plug-in first.")
     nodes = cmds.ls(type=NODE_NAME, long=True) or []
@@ -825,7 +837,7 @@ def disable():
 
 def status():
     from . import fast_viewport
-    if fast_viewport._panels:return fast_viewport.status()
+    if fast_viewport._library is not None and fast_viewport.status()['enabled']:return fast_viewport.status()
     nodes = cmds.ls(type=NODE_NAME, long=True) or [] if _registered else []
     return dict(_last_report, registered=_registered, nodes=nodes,
                 enabled=any(cmds.getAttr(node + ".linePreviewEnabled") for node in nodes),

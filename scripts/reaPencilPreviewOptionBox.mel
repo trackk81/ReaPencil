@@ -1,0 +1,4 @@
+global proc reaPencilPreviewOptionBox()
+{
+    python("from reatoon import ui; ui.show_advanced()");
+}
