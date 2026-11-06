@@ -731,6 +731,8 @@ def register(plugin_fn):
 def unregister(plugin_fn):
     global _registered, _snapshot, _intersection_cache, _prepared_edges, _static_draw_cache, _gpu_scene
     global _native_plugin, _native_lib, _native_last_groups
+    from . import fast_viewport
+    fast_viewport.shutdown()
     _stop_callbacks()
     if _native_plugin:
         cmds.unloadPlugin(_native_plugin)
@@ -752,6 +754,8 @@ def unregister(plugin_fn):
 
 def enable():
     """Create one tiny helper locator, preserving the user's selection."""
+    from . import fast_viewport
+    fast_viewport.disable()
     if not _registered:
         raise RuntimeError("RevToon viewport node is not registered; load the plug-in first.")
     nodes = cmds.ls(type=NODE_NAME, long=True) or []
@@ -787,6 +791,8 @@ def enable():
 def disable():
     """Remove only our viewport helper shapes/transforms, allowing plug-in unload."""
     global _gpu_scene, _native_last_groups
+    from . import fast_viewport
+    fast_viewport.disable()
     nodes = cmds.ls(type=NODE_NAME, long=True) or []
     selection = cmds.ls(selection=True, long=True) or []
     cmds.undoInfo(openChunk=True, chunkName="Disable RevToon viewport")
@@ -818,6 +824,8 @@ def disable():
 
 
 def status():
+    from . import fast_viewport
+    if fast_viewport._panels:return fast_viewport.status()
     nodes = cmds.ls(type=NODE_NAME, long=True) or [] if _registered else []
     return dict(_last_report, registered=_registered, nodes=nodes,
                 enabled=any(cmds.getAttr(node + ".linePreviewEnabled") for node in nodes),

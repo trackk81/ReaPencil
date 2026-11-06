@@ -46,7 +46,10 @@ def install_menu():
     from . import alpha_boundary
     cmds.menuItem(label="Alpha Boundary / 알파 경계선",command=lambda *_:_safe(alpha_boundary.show))
     cmds.menuItem(divider=True)
-    cmds.menuItem(label="Enable live viewport lines", command=lambda *_: _safe(_viewport_on))
+    cmds.menuItem(label="Enable live viewport lines (Precise)", command=lambda *_: _safe(_viewport_on))
+    from . import fast_viewport
+    cmds.menuItem(label="고속 GPU 프리뷰 켜기",annotation="Screen-space preview for all visible surfaces; CPU final rendering is unchanged",command=lambda *_:_safe(fast_viewport.enable))
+    cmds.menuItem(label="고속 프리뷰 설정…",command=lambda *_:_safe(fast_viewport.show))
     cmds.menuItem(label="Disable live viewport lines", command=lambda *_: _safe(_viewport_off))
     cmds.menuItem(label="Use ReaPencil in Render Settings", command=lambda *_: _safe(_select_renderer))
     cmds.menuItem(label="Inspect Pencil+ compatibility", command=lambda *_: _safe(_pencil_import, True))
@@ -175,7 +178,7 @@ def _viewport_on(*_):
     state=viewport.status()
     if state.get('state')=='error':
         raise RuntimeError(state.get('error','Viewport initialization failed'))
-    label=('GPU: '+state.get('device','OpenCL')) if state.get('backend')=='opencl_gpu' else 'CPU'
+    label=('GPU: '+state.get('device','OpenCL')) if state.get('backend') in ('opencl_gpu','retained_gpu','screen_space_gpu') else 'CPU'
     cmds.inViewMessage(amg='ReaPencil live lines enabled — '+label, pos='midCenter', fade=True)
 
 

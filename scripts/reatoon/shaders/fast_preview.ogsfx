@@ -1,0 +1,53 @@
+#version 410
+// Independent depth-contour preview. No triangle intersection computation.
+uniform mat4 quadMatrix : WorldViewProjection;
+uniform mat4 inverseProjection;
+uniform vec2 imageSize;
+uniform vec4 lineColor={0,0,0,1};
+uniform float lineWidth=1.5;
+uniform float creaseThreshold=0.25;
+uniform texture2D sceneColor;
+uniform texture2D sceneDepth;
+uniform sampler2D colorSampler=sampler_state {Texture=<sceneColor>;TEXTURE_MIN_FILTER=NEAREST;TEXTURE_MAG_FILTER=NEAREST;TEXTURE_WRAP_S=CLAMP_TO_EDGE;TEXTURE_WRAP_T=CLAMP_TO_EDGE;};
+uniform sampler2D depthSampler=sampler_state {Texture=<sceneDepth>;TEXTURE_MIN_FILTER=NEAREST;TEXTURE_MAG_FILTER=NEAREST;TEXTURE_WRAP_S=CLAMP_TO_EDGE;TEXTURE_WRAP_T=CLAMP_TO_EDGE;};
+attribute Input {vec4 position:POSITION;vec2 texcoord:TEXCOORD0;};
+attribute Interpolated {vec2 uv:TEXCOORD0;};
+attribute Output {vec4 result:COLOR0;};
+GLSLShader FastVertex {
+    void main(){gl_Position=quadMatrix*position;uv=texcoord;}
+}
+GLSLShader FastPixel {
+    float depthAt(ivec2 p){return texelFetch(depthSampler,clamp(p,ivec2(0),ivec2(imageSize)-1),0).r;}
+    vec3 location(ivec2 p){vec2 st=(vec2(p)+.5)/imageSize;vec4 q=inverseProjection*vec4(st*2.-1.,depthAt(p)*2.-1.,1.);return q.xyz/q.w;}
+    vec3 surfaceNormal(ivec2 p){
+        vec3 c=location(p),l=c-location(p-ivec2(1,0)),r=location(p+ivec2(1,0))-c;
+        vec3 d=c-location(p-ivec2(0,1)),u=location(p+ivec2(0,1))-c;
+        return normalize(cross(abs(l.z)<abs(r.z)?l:r,abs(d.z)<abs(u.z)?d:u));
+    }
+    void main(){
+        vec4 base=texture(colorSampler,uv);ivec2 p=ivec2(uv*imageSize);int radius=max(int(floor(lineWidth*.5+.5)),1);
+        float center=depthAt(p),l=depthAt(p-ivec2(radius,0)),r=depthAt(p+ivec2(radius,0));
+        float d=depthAt(p-ivec2(0,radius)),u=depthAt(p+ivec2(0,radius));
+        float coverage=0.;bool here=center<.999999;
+        if((l<.999999)!=here||(r<.999999)!=here||(d<.999999)!=here||(u<.999999)!=here)coverage=1.;
+        // Flat rasterized planes have linear depth. Quantization alone must not
+        // produce an edge. Only inspect normals near a real depth-slope change.
+        float curvature=max(abs(l+r-2.*center),abs(d+u-2.*center));
+        if(here&&coverage<1.&&curvature>8./16777215.){
+            vec3 c=location(p),n=surfaceNormal(p);
+            float span=min(length(location(p+ivec2(1,0))-c),length(location(p-ivec2(1,0))-c));
+            for(int i=0;i<4;i++){
+                ivec2 offset=i==0?ivec2(radius,0):i==1?ivec2(-radius,0):i==2?ivec2(0,radius):ivec2(0,-radius);
+                ivec2 q=p+offset;if(depthAt(q)>=.999999)continue;
+                float bend=1.-abs(dot(n,surfaceNormal(q)));
+                float gap=abs(dot(n,location(q)-c))/max(span*float(radius),1e-8);
+                coverage=max(coverage,max(smoothstep(creaseThreshold,creaseThreshold+.12,bend),smoothstep(1.5,3.,gap)));
+            }
+        }
+        result=vec4(mix(base.rgb,lineColor.rgb,coverage),base.a);
+    }
+}
+technique Main {pass P {
+    VertexShader(in Input,out Interpolated)=FastVertex;
+    PixelShader(in Interpolated,out Output)=FastPixel;
+}}

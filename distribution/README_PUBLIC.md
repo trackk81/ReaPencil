@@ -2,6 +2,7 @@
 
 Windows x64 / Autodesk Maya 2025용 독립 NPR 라인 플러그인입니다.
 
+- 선택 가능한 화면 공간 GPU 고속 프리뷰: 리깅 조작용, 전체 표시 표면에 단일 스타일 적용
 - GPU 실시간 뷰포트: 외곽선, 열린 에지, 하드 에지, 재질 경계, 교차선
 - CPU 최종 렌더, 라인셋, Merge Groups, Render Elements
 - PNG 알파·흑백 마스크 경계선, 내부 구멍, 메시 변형 및 스무스 대응
@@ -24,6 +25,12 @@ reapencil_start.launch()
 ```
 
 Plug-in Manager의 기본 파일은 **reaPencil.py**입니다. Maya가 허용 여부를 물으면 설치한 파일과 경로를 직접 확인하세요. GPU 화면 표시용 **reaPencilDraw088.mll**은 메인 플러그인이 자동으로 불러오는 보조 모듈입니다.
+
+## 고속 프리뷰
+
+**ReaPencil → 고속 GPU 프리뷰 켜기**를 선택합니다. **고속 프리뷰 설정…**에서 굵기·색상을 조절합니다. 화면 깊이 기반의 근사 표시이며 개별 라인셋·재질 경계·숨은 선을 정확히 재현하지 않습니다. 기존 정밀 표시로 돌아가려면 **Enable live viewport lines (Precise)**를 선택하세요. 최종 렌더는 CPU 그대로입니다.
+
+이 옵션은 Viewport 2.0 OpenGL Core Profile을 사용하며 **reaPencilFast089.mll**을 자동으로 불러옵니다. 리깅 자체가 느리면 프리뷰를 바꿔도 그 평가 비용은 남습니다.
 
 ## 이후 업데이트
 
