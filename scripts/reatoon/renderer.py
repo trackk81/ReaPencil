@@ -32,6 +32,8 @@ DEFAULTS = dict(width=640, height=480, supersample=2, background=[1, 1, 1],
                 connect_collinear_dashes=False,
                 line_opacity=1.0,
                 brush_size_scale=1.0,
+                width_profile=[], alpha_profile=[], profile_direction=-30.,
+                profile_split_angle=90., profile_loop_direction=0, pencil_profile_width=True,
                 seed=1, line_sets={},edge_prepare_workers=4)
 
 
@@ -394,7 +396,7 @@ def classify_edge_indices(prepared, camera, settings):
     if settings.get('material_boundaries'):
         flags[multi & p['material']] |= 16
     if settings.get('hard_edges'):
-        flags[p['hard']] |= 32
+        flags[multi & p['hard']] |= 32
     if settings.get('selected_edges'):
         flags[p['selected']] |= 64
     return np.flatnonzero(flags), flags
@@ -424,6 +426,7 @@ def line_style_passes(scene, settings=None):
         scale=float(style.get('brush_size_scale',1.))
         if not math.isfinite(scale) or not 0<=scale<=1:
             raise ValueError('Brush width multiplier must be finite and in 0..1')
+        brush_scale=scale
         if scale!=1.:style['line_width']*=scale
         if style.get('relative_line_size', False):
             # Original 4.2.3 rectangle probes: width/640, independent of
@@ -433,6 +436,11 @@ def line_style_passes(scene, settings=None):
                 style[key] *= scale
             if style.get('dash_gap', -1.) >= 0:
                 style['dash_gap'] *= scale
+        if style.get('pencil_profile_width',False) and (style.get('width_profile') or style.get('alpha_profile')):
+            style['_profile_source_width']=float(style['line_width'])
+            style['_profile_width_scale']=brush_scale
+            nominal=style['line_width']/brush_scale if brush_scale>0 else 0.
+            style['line_width']=2.*style['line_width'] if nominal<2. else style['line_width']+2.*brush_scale
         return style
     meshes = scene.get("meshes", [])
     if not any("line_passes" in mesh for mesh in meshes):
@@ -556,7 +564,7 @@ def world_line_segments(scene, settings=None, intersections=None, prepared_edges
                         segments.append(dict(a=list(mesh['vertices'][pair[0]]), b=list(mesh['vertices'][pair[1]]),
                                              features=features, mesh_index=index, mesh=mesh.get('name', 'mesh'),
                                              settings=local, line=item['line']))
-                        if local.get('connect_collinear_dashes',False):
+                        if local.get('connect_collinear_dashes',False) or local.get('width_profile') or local.get('alpha_profile'):
                             segments[-1]['_vertex_ids']=tuple(int(v) for v in pair)
                 if triangle_outlines is not None and local.get('outline'):
                     chosen=np.flatnonzero(diagonal_styles==style_id)
@@ -567,7 +575,7 @@ def world_line_segments(scene, settings=None, intersections=None, prepared_edges
                         for pair in diagonal_pairs[chosen]:
                             segments.append(dict(a=list(mesh['vertices'][pair[0]]),b=list(mesh['vertices'][pair[1]]),
                                 features=['outline'],mesh_index=index,mesh=mesh.get('name','mesh'),settings=local,line=item['line']))
-                            if local.get('connect_collinear_dashes',False):
+                            if local.get('connect_collinear_dashes',False) or local.get('width_profile') or local.get('alpha_profile'):
                                 segments[-1]['_vertex_ids']=tuple(int(v) for v in pair)
         if packed and hasattr(intersections,'batches'):
             sentinel=len(styles)
@@ -726,6 +734,17 @@ def render(scene, output_prefix, settings=None, depth_prepass=None):
         if len(all_styles)!=1 or all_styles[0].get('hidden_lines',False):
             raise ValueError('Brush opacity currently requires one visible-only line style; multiple/hidden brushes are not implemented')
         frame_opacity=opacities[0]
+    profiles_active=any(s.get('width_profile') or s.get('alpha_profile') for s in all_styles)
+    variable_alpha=any(s.get('alpha_profile') for s in all_styles)
+    profile_coverage_union=variable_alpha or (profiles_active and len(all_styles)==1 and all_styles[0].get('pencil_profile_width',False) and not all_styles[0].get('hidden_lines',False))
+    if variable_alpha and (len(all_styles)!=1 or all_styles[0].get('hidden_lines',False)):
+        raise ValueError('Varying alpha requires one visible-only line style')
+    if profiles_active:
+        from .brush_profiles import profile_table
+        for style in all_styles:
+            profile_table(style.get('width_profile',[]));profile_table(style.get('alpha_profile',[]))
+            if any(float(style.get(k,0))!=0 for k in ('distance_reduction','width_variation','taper')):
+                raise ValueError('Varying profiles with distance reduction, variation or taper are not implemented')
     width, height, ss = int(cfg["width"]), int(cfg["height"]), int(cfg["supersample"])
     if not (1 <= width <= 4096 and 1 <= height <= 4096 and ss in (1, 2, 3, 4)):
         raise ValueError("Resolution must be 1..4096 and supersample 1..4")
@@ -923,6 +942,20 @@ def render(scene, output_prefix, settings=None, depth_prepass=None):
         count=len(remaining_segments)
         remaining_segments=connect_collinear(remaining_segments)
         stats['collinear_connections']=count-len(remaining_segments)
+    if profiles_active:
+        if not elements and group_image is None and cfg.get('compiled_segments',True) and hasattr(remaining_segments,'parts'):
+            from .cpu_brush import render_packed
+            batch=render_packed(remaining_segments,camera,depth,depth_planes,visible,ss,visibility,union_coverage=profile_coverage_union)
+            if batch is not None:stats.update(batch);remaining_segments=[]
+        if len(remaining_segments):
+            from .profile_strokes import assign_coordinates
+            remaining_segments=assign_coordinates(remaining_segments,camera,_project)
+            if not elements and group_image is None and cfg.get('compiled_segments',True):
+                from .cpu_brush import render_segments as profile_segments
+                batch=profile_segments(remaining_segments,camera,depth,depth_planes,visible,ss,visibility,union_coverage=profile_coverage_union)
+                if batch is not None:stats.update(batch);remaining_segments=[]
+        stats['profile_backend']='native-cpu-adaptive-bezier'
+        warnings.append('Curve raster: projected-angle corner links and clockwise/anticlockwise loops are supported. Rectangle seams are replay-tested; irregular/subdivided loop origin and exact direction ties remain approximate. Branches and intersection pieces split; SVG/EPS omitted.')
     for edge_index, segment in enumerate(remaining_segments):
         mesh_index = segment["mesh_index"]
         local, kinds = segment["settings"], segment["features"]
@@ -962,6 +995,15 @@ def render(scene, output_prefix, settings=None, depth_prepass=None):
             z = 1 / ((1 - mid) / a[2] + mid / b[2])
         surface_z = _surface_depth_at(xy, depth, depth_planes, camera)
         front = z <= surface_z + float(local["depth_bias"]) * np.maximum(1., z)
+        if profiles_active and visibility is not None:
+            from .cpu_visibility import visible_samples
+            ambiguous=front & (z>surface_z+256*np.finfo(np.float64).eps*np.maximum(1.,np.abs(z)))
+            indices=np.flatnonzero(ambiguous)
+            if len(indices):
+                exact=visible_samples({'arguments':visibility},xy[indices],z[indices],camera)
+                front[indices]=exact
+                refinement=stats.setdefault('profile_visibility_refinement',dict(checked_samples=0,hidden_samples=0))
+                refinement['checked_samples']+=len(indices);refinement['hidden_samples']+=int(np.count_nonzero(~exact))
         merged = np.zeros(len(mid), dtype=bool)
         if group_image is not None and local.get("merge_groups", True) and mesh_groups[mesh_index] >= 0 and set(kinds) & {"outline", "open"}:
             delta = q - p
@@ -975,6 +1017,44 @@ def render(scene, output_prefix, settings=None, depth_prepass=None):
                 both.append(match)
             merged = both[0] & both[1]
             stats["merge_suppressed_samples"] = stats.get("merge_suppressed_samples", 0) + int(np.count_nonzero(merged))
+        if local.get('width_profile') or local.get('alpha_profile'):
+            from .profile_strokes import draw,maximum_over
+            u=segment.get('_profile_u')
+            if u is None:
+                direction=np.asarray([math.cos(math.radians(local.get('profile_direction',-30.))),math.sin(math.radians(local.get('profile_direction',-30.)))])
+                u=[0.,1.] if np.dot(q-p,direction)>=0 else [1.,0.]
+            else:
+                # Adjust coordinates for near/far clipping before viewport clipping.
+                original=_project(points,camera);delta=original[1]-original[0];den=float(np.dot(delta,delta))
+                if den>1e-20:
+                    ends_t=np.clip((np.asarray([p,q])-original[0])@delta/den,0,1)
+                    u=np.asarray(u)[0]+ends_t*(u[1]-u[0])
+            allowed=np.asarray([bool([f for f in kinds if not (merged[k] and f in ('outline','open'))]) for k in range(len(mid))])
+            dash=float(local.get('dash_length',0))*ss
+            if dash>0:
+                gap=float(local.get('dash_gap',-1.))
+                if gap<0:allowed&=(np.floor(mid*length/dash).astype(np.int64)%2)==0
+                elif gap>0:allowed&=(mid*length)%(dash+gap*ss)<dash
+            for vis in (True,False):
+                if not vis and not local['hidden_lines']:continue
+                mask=allowed&(front==vis)
+                color=_color(local['line_color'] if vis else local['hidden_color'])
+                n=draw(edge_visible if vis else edge_hidden,p,q,ts,mask,color,float(local['line_width'])*ss,local,u,low,ss)
+                if not local.get('output_to_elements_only',False):stats['visible_segments' if vis else 'hidden_segments']+=n
+                for element,_,scratch in element_strokes:
+                    if element['output_element']=='depth':raise ValueError('Depth render elements with varying brush profiles are not implemented')
+                    emask=mask.copy()
+                    for k in np.flatnonzero(emask):
+                        features=[f for f in kinds if not (merged[k] and f in ('outline','open'))]
+                        if not render_elements.accepts(element,vis,features,local):emask[k]=False
+                    draw(scratch[int(vis)],p,q,ts,emask,color,float(local['line_width'])*ss,local,u,low,ss)
+            blend=maximum_over if profile_coverage_union else _over
+            if not local.get('output_to_elements_only',False):
+                blend(visible[low[1]:high[1],low[0]:high[0]],edge_visible)
+                if hidden is not None:blend(hidden[low[1]:high[1],low[0]:high[0]],edge_hidden)
+            for _,layer,scratch in element_strokes:
+                for vis in (0,1):blend(layer[vis,low[1]:high[1],low[0]:high[0]],scratch[vis])
+            continue
         rng = np.random.default_rng(int(local["seed"]) + mesh_index * 1000003 + edge_index)
         phase = rng.uniform(0, 2 * math.pi)
         records = []
@@ -1054,6 +1134,8 @@ def render(scene, output_prefix, settings=None, depth_prepass=None):
     paths = {k: str(prefix.parent / (prefix.name + "_" + k + ext)) for k, ext in
              (("beauty", ".png"), ("visible", ".png"), ("hidden", ".png"), ("depth", ".png"),
               ("lines", ".svg"), ("eps", ".eps"), ("manifest", ".json")) if auxiliary or k in ('beauty','manifest')}
+    if profiles_active:
+        paths.pop('eps',None);paths.pop('lines',None)
     if frame_opacity!=1. and 'eps' in paths:
         del paths['eps']
         warnings.append('EPS output skipped: translucent brush output requires an alpha-capable format; use PNG or SVG')
@@ -1083,7 +1165,7 @@ def render(scene, output_prefix, settings=None, depth_prepass=None):
     svg.append("</svg>")
     eps.extend(["showpage", "%%EOF"])
     if auxiliary:
-        Path(paths['lines']).write_text('\n'.join(svg), encoding='utf-8')
+        if 'lines' in paths:Path(paths['lines']).write_text('\n'.join(svg), encoding='utf-8')
         if 'eps' in paths:Path(paths['eps']).write_text('\n'.join(eps), encoding='ascii')
     for element, layer in elements:
         path = render_elements.output_path(element, prefix, scene.get("scene_name", ""))
@@ -1096,7 +1178,7 @@ def render(scene, output_prefix, settings=None, depth_prepass=None):
                 layer[..., 3] = 1
             _png(path, _straight(_down(layer, ss)))
         else:
-            if frame_opacity!=1.:
+            if frame_opacity!=1. or profiles_active:
                 element_results.append(dict(name=element['name'],status='unsupported',kind=element['kind'],
                     reason='EPS cannot preserve translucent brush output; use PNG or SVG'))
                 warnings.append(element['name']+': EPS skipped because brush opacity is below one')

@@ -29,7 +29,7 @@ class PackedSegments:
         points=prepared['vertices'][prepared['pairs'][indices]]
         self.parts.append(dict(points=points,flags=flags[indices],settings=style,
             mesh=mesh.get('name','mesh'),mesh_index=index,line=line,count=len(indices)))
-        if style.get('connect_collinear_dashes',False):
+        if style.get('connect_collinear_dashes',False) or style.get('width_profile') or style.get('alpha_profile'):
             self.parts[-1]['vertex_ids']=prepared['pairs'][indices]
         self.count+=len(indices)
 

@@ -20,7 +20,7 @@ def is_unknown(node):
     return cmds.nodeType(node) in ('unknown','unknownDag','unknownTransform') and kind(node) in SCHEMA
 
 
-def saved_profile(node,prefix):
+def saved_profile_points(node,prefix):
     """Saved-file snapshot fallback, never an evaluation of source MEL."""
     if not is_unknown(node) or kind(node)!='PencilBrushDetail':return None
     if cmds.listConnections(node,source=True,destination=False):return None
@@ -36,7 +36,12 @@ def saved_profile(node,prefix):
         rows=read_profiles(path).get(uid,{}).get({'sr':'srcps','sa':'sacps'}[prefix])
     except (OSError,ValueError):return None
     if not rows:return None
-    return [(row[0],row[3],row[4]) for _,row in sorted(rows.items())]
+    return [list(row) for _,row in sorted(rows.items())]
+
+
+def saved_profile(node,prefix):
+    rows=saved_profile_points(node,prefix)
+    return None if rows is None else [(row[0],row[3],row[4]) for row in rows]
 
 
 def saved_ascii_profile(node,prefix):

@@ -21,6 +21,8 @@ from maya import cmds
 from maya.api import OpenMaya as om
 from maya.api import OpenMayaRender as omr
 from maya.api import OpenMayaUI as omui
+# Load our callback dependency before Maya enters scene-file security scope.
+from .view_scope import is_display_set
 
 NODE_NAME = "reaToonViewport"
 TYPE_ID = om.MTypeId(0x0007F7F7)
@@ -62,6 +64,7 @@ _smooth_rebuild_only=False
 
 
 _fast_target_revision=0
+_alpha_dependency_hashes=set()
 def request_refresh(graph_changed=False,style_changed=False):
     global _fast_target_revision
     if graph_changed or style_changed:_fast_target_revision+=1
@@ -105,7 +108,6 @@ def _node_changed(node,*_):
     try:kind=om.MFnDependencyNode(node).typeName
     except RuntimeError:return _scene_changed()
     if kind=='objectSet':
-        from .view_scope import is_display_set
         if is_display_set(om.MFnDependencyNode(node).name()):return
         _watchers_stale=True
         request_refresh(graph_changed=True)
@@ -129,6 +131,10 @@ def _attribute_changed(message, *args):
             plug=args[0]
             name=plug.partialName(useLongNames=True)
             kind=om.MFnDependencyNode(plug.node()).typeName
+            if om.MObjectHandle(plug.node()).hashCode() in _alpha_dependency_hashes:
+                _gpu_rebuild=True;_smooth_rebuild_only=False
+                if message & (om.MNodeMessage.kConnectionMade|om.MNodeMessage.kConnectionBroken):_scene_changed()
+                request_refresh()
             if kind in ('revToonLine','revToonLineSet') and name=='overrides':
                 request_refresh(style_changed=True)
             elif kind in ('revToonLine','revToonLineSet','revToonRenderElement','objectSet','shadingEngine') or name=='revToonMergeGroup':
@@ -155,7 +161,6 @@ def _targets_changed(*_):
     global _gpu_rebuild,_gpu_graph_dirty,_smooth_rebuild_only
     if _:
         try:
-            from .view_scope import is_display_set
             if is_display_set(om.MFnDependencyNode(_[0]).name()):return
         except (RuntimeError,TypeError):pass
     _gpu_rebuild=True
@@ -185,6 +190,15 @@ def _watch_scene():
         while parent:
             names.add(parent)
             parent = parent.rsplit("|", 1)[0]
+    _alpha_dependency_hashes.clear()
+    alpha_names=set()
+    from . import alpha_boundary
+    for mesh in cmds.ls(type='mesh',long=True) or []:
+        if not cmds.attributeQuery(alpha_boundary.ATTRIBUTE,node=mesh,exists=True):continue
+        for source in alpha_boundary.material_sources(mesh).values():
+            alpha_names.update((source['file_node'],source['shader']))
+            alpha_names.update(cmds.listConnections(source['file_node'],source=True,destination=False,type='place2dTexture') or [])
+    names.update(alpha_names)
     names.update(cmds.ls(type="shadingEngine") or [])
     # A merge group can contain existing/nested sets whose membership changes
     # independently of the registered wrapper set.
@@ -197,7 +211,6 @@ def _watch_scene():
     for name in names:
         try:
             if cmds.nodeType(name)=='objectSet':
-                from .view_scope import is_display_set
                 if is_display_set(name):continue
             selection = om.MSelectionList()
             selection.add(name)
@@ -206,6 +219,7 @@ def _watch_scene():
             if key in seen:
                 continue
             seen.add(key)
+            if name in alpha_names:_alpha_dependency_hashes.add(key)
             _node_callbacks.append(om.MNodeMessage.addNodeDirtyCallback(obj, _invalidate))
             _node_callbacks.append(om.MNodeMessage.addAttributeChangedCallback(obj, _attribute_changed))
             if obj.hasFn(om.MFn.kMesh):

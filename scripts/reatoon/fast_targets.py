@@ -7,9 +7,10 @@ _key=None
 rebuilds=0
 _watching=False
 _feature_watch=None
+_last_plan={}
 
 def sync():
-    global _key,rebuilds,_watching,_feature_watch
+    global _key,rebuilds,_watching,_feature_watch,_last_plan
     from . import viewport,line_graph,fast_viewport
     if viewport._watchers_stale or not _watching or _feature_watch!=any(fast_viewport._edge_flags):
         viewport._remove_callbacks(viewport._node_callbacks)
@@ -25,7 +26,7 @@ def sync():
         viewport._watchers_stale=False;_watching=True
     key=viewport._fast_target_revision
     if key==_key:return
-    graph=line_graph.snapshot();members=[];all_full=True
+    graph=line_graph.snapshot();members=[];all_full=True;assigned_shaders=set()
     rebuilds+=1
     for name in cmds.ls(type='mesh',long=True,allPaths=True) or []:
         if cmds.getAttr(name+'.intermediateObject'):continue
@@ -34,6 +35,7 @@ def sync():
         for engine in engines:
             source=cmds.listConnections(om.MFnDependencyNode(engine).name()+'.surfaceShader',source=True,destination=False) or []
             shaders.append(source[0] if source else '')
+        assigned_shaders.update(shaders)
         passes,_=line_graph.resolve_mesh(path,fn.numPolygons,shaders,ids,graph)
         keep=np.zeros(fn.numPolygons,bool)
         for item in passes:keep|=np.asarray([v is not None for v in item['face_line_sets']])
@@ -43,9 +45,13 @@ def sync():
             indices=np.flatnonzero(keep);starts=np.r_[0,np.flatnonzero(np.diff(indices)>1)+1];ends=np.r_[starts[1:]-1,len(indices)-1]
             members.extend(name+'.f[%d:%d]'%(indices[a],indices[b]) for a,b in zip(starts,ends))
         else:all_full=False
+    blockers=[]
     for shape in cmds.ls(shapes=True,long=True) or []:
         sel=om.MSelectionList();sel.add(shape);obj=sel.getDagPath(0).node()
-        if not any(obj.hasFn(k) for k in (om.MFn.kMesh,om.MFn.kNurbsCurve,om.MFn.kCamera,om.MFn.kLocator,om.MFn.kLight)):all_full=False
+        if not any(obj.hasFn(k) for k in (om.MFn.kMesh,om.MFn.kNurbsCurve,om.MFn.kCamera,om.MFn.kLocator,om.MFn.kLight)):all_full=False;blockers.append(shape)
+    unused=sorted({s for line in graph for item in line['sets'] for s in item['shaders']}-assigned_shaders)
+    _last_plan=dict(unassigned_shader_targets=unused,revision=key,rebuilds=rebuilds,members=list(members),target_all=bool(all_full and members),other_shape_blockers=blockers)
+    fast_viewport._target_summary=dict(unassigned_shader_targets=unused,target_ranges=len(members))
     lib=fast_viewport._library;lib.rp_fast_all.argtypes=[ctypes.c_int];lib.rp_fast_all(int(all_full and bool(members))); lib.rp_fast_targets.argtypes=[ctypes.c_char_p];lib.rp_fast_targets.restype=None
     lib.rp_fast_targets(('\n'.join(members)).encode('utf-8'));_key=key
 
@@ -63,3 +69,7 @@ def edge_scope(panel):
     group=cmds.isolateSelect(panel,q=True,viewObjects=True)
     members=cmds.sets(group,q=True) or []
     return '\n'.join(n.split('.',1)[0] for n in (cmds.ls(members,long=True) or [])) if members else ''
+
+
+def diagnostics():
+    return dict(_last_plan)

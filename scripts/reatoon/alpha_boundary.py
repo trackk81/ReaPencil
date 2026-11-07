@@ -59,7 +59,19 @@ def configuration(shape):
     if not cmds.attributeQuery(ATTRIBUTE,node=shape,exists=True):return None
     value=cmds.getAttr(shape+'.'+ATTRIBUTE)
     data=json.loads(value) if value else None
-    return data if data and data.get('enabled',True) else None
+    if not data or not data.get('enabled',True):return None
+    # Explicit image overrides remain snapshots. Material-derived sources
+    # follow the same assigned shader's live connection without editing the DG.
+    saved=data.get('sources',{})
+    if 'all' in saved or not any(v.get('file_node') for v in saved.values()):return data
+    live=material_sources(shape);current={}
+    for key,source in saved.items():
+        if not source.get('file_node'):current[key]=source;continue
+        for value in live.values():
+            if (source.get('shader_uuid') and source['shader_uuid']==value.get('shader_uuid')) or (not source.get('shader_uuid') and source.get('shader')==value.get('shader')):
+                current[key]=value;break
+        else:current[key]=source # Preserve the saved override for an unresolved network.
+    return dict(data,sources=current) if current else None
 
 
 def selected_meshes():
@@ -77,6 +89,21 @@ def selected_meshes():
     return sorted(set(n for n in result if not cmds.getAttr(n+'.intermediateObject')))
 
 
+@lru_cache(maxsize=32)
+def _image_has_alpha(path,modified,size):
+    from PySide6.QtGui import QImage
+    image=QImage(path)
+    if image.isNull():raise ValueError('Cannot read opacity texture: '+path)
+    return image.hasAlphaChannel()
+
+
+def _has_alpha(node):
+    path=os.path.abspath(os.path.expandvars(cmds.getAttr(node+'.fileTextureName')))
+    try:
+        stat=os.stat(path);return _image_has_alpha(path,stat.st_mtime_ns,stat.st_size)
+    except (OSError,ValueError):return bool(cmds.getAttr(node+'.fileHasAlpha'))
+
+
 def _source(plug,inverted=False):
     links=cmds.listConnections(plug,s=True,d=False,plugs=True) or []
     if len(links)!=1:return None
@@ -86,7 +113,9 @@ def _source(plug,inverted=False):
         return _source(node+'.'+component,not inverted)
     if kind!='file':return None
     if attr.startswith('outTransparency'):
-        inverted=not inverted;channel='luminance' if cmds.getAttr(node+'.alphaIsLuminance') else 'alpha'
+        inverted=not inverted
+        # Maya outTransparency falls back to RGB for images without alpha.
+        channel='luminance' if cmds.getAttr(node+'.alphaIsLuminance') or not _has_alpha(node) else 'alpha'
     elif attr=='outAlpha':channel='luminance' if cmds.getAttr(node+'.alphaIsLuminance') else 'alpha'
     else:channel={'outColorR':'red','outColorG':'green','outColorB':'blue'}.get(attr,'luminance')
     unsupported=[]

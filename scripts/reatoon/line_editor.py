@@ -325,6 +325,12 @@ def _set_changed(ctx):
                        ('taper','Taper'),('dash_length','Dash length'),('dash_gap','Dash gap (-1 = length)'),
                        ('connect_collinear_dashes','Connect collinear dashes (CPU)')]:
         _field(node, key, label, values)
+    _field(node,'profile_direction','Stroke direction (degrees)',values)
+    _field(node,'profile_split_angle','Stroke split angle (degrees)',values)
+    _field(node,'profile_loop_direction','Loop direction (0=CW, 1=CCW)',values)
+    _field(node,'pencil_profile_width','Match Pencil+ profile widths (CPU)',values)
+    for key,label in [('width_profile','Width profile (CPU)'),('alpha_profile','Alpha profile (CPU)')]:
+        cmds.button(label=tr(label),command=lambda *_,k=key:_edit_profile(node,k))
     cmds.text(label=tr('Taper and variation are supported by offline rendering.\nVP2 shows constant width per edge.'), align='left')
     cmds.setParent(tabs)
     cmds.tabLayout(tabs, edit=True, tabLabel=tr([(visible,'Visible Lines'),(hidden,'Hidden Lines'),(detail,'Brush Details')]))
@@ -584,3 +590,8 @@ def _build_ae(ctx):
     ctx['detail'] = cmds.columnLayout(adjustableColumn=True)
     _refresh(ctx)
 
+
+
+def _edit_profile(node,key):
+    from .profile_editor import open_editor
+    open_editor(node,key)

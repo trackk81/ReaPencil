@@ -15,6 +15,8 @@ DEFAULT_SETTINGS = {
     "connect_collinear_dashes": False,
     "line_opacity": 1.0,
     "brush_size_scale": 1.0,
+    "width_profile": [], "alpha_profile": [], "profile_direction": -30.0,
+    "profile_split_angle": 90.0, "profile_loop_direction": 0, "pencil_profile_width": True,
     "width": 640, "height": 480, "supersample": 2,
     "background": [1.0, 1.0, 1.0], "line_width": 1.5,
     "line_color": [0.05, 0.05, 0.08], "hidden_lines": False,
@@ -67,7 +69,7 @@ def validate_settings(values, partial=False):
         raise ValueError("Settings must be an object.")
     result = {} if partial else dict(DEFAULT_SETTINGS)
     ranges = {"width": (16, 4096), "height": (16, 4096), "supersample": (1, 4),
-              "line_width": (0.1, 64), "line_opacity": (0, 1), "brush_size_scale": (0, 1), "crease_angle": (0, 180),
+              "profile_split_angle": (0,180), "profile_loop_direction": (0,1), "profile_direction": (-360,360), "line_width": (0.1, 64), "line_opacity": (0, 1), "brush_size_scale": (0, 1), "crease_angle": (0, 180),
               "intersection_tolerance": (1e-12, 0.01),
               "depth_bias": (0, 1), "distance_reduction": (0, 1000),
               "width_variation": (0, 1), "taper": (0, 1),
@@ -76,7 +78,10 @@ def validate_settings(values, partial=False):
         if key not in DEFAULT_SETTINGS:
             raise ValueError("Unknown setting: " + str(key))
         default = DEFAULT_SETTINGS[key]
-        if isinstance(default, bool):
+        if key in ("width_profile","alpha_profile"):
+            from .brush_profiles import validate_profile,profile_table
+            value=validate_profile(value);profile_table(value)
+        elif isinstance(default, bool):
             if not isinstance(value, bool):
                 raise ValueError(key + " must be boolean")
         elif isinstance(default, list):

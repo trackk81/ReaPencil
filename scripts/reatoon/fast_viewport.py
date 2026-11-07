@@ -9,6 +9,7 @@ _library=None
 _plugin=None
 _panels={}
 _edge_flags=(False,False)
+_target_summary={}
 
 def configure(width=1.5,crease=.25,color=(0.,0.,0.),antialias=True,hard_edges=False,crease_edges=False):
     global _edge_flags
@@ -66,12 +67,29 @@ def preferences():
     def get(name,default):return cmds.optionVar(q=name) if cmds.optionVar(exists=name) else default
     return dict(width=get('reaPencilFastWidth',1.5),crease=get('reaPencilFastCrease',.25),color=get('reaPencilFastColor',[0.,0.,0.]),antialias=bool(get('reaPencilFastAA',1)),hard_edges=bool(get('reaPencilFastHardEdges',0)),crease_edges=bool(get('reaPencilFastCreaseEdges',0)))
 
+def alpha_prepass():
+    try:return bool(cmds.getAttr('hardwareRenderingGlobals.alphaCutPrepass'))
+    except (RuntimeError,ValueError):return False
+
+
+def set_alpha_prepass(enabled):
+    # A normal Maya viewport option; the CPU render settings are independent.
+    enabled=bool(enabled)
+    if alpha_prepass()!=enabled:cmds.setAttr('hardwareRenderingGlobals.alphaCutPrepass',enabled)
+    cmds.refresh(force=True)
+
+
 def show():
     window='reaPencilFastPreviewSettings'
     if cmds.window(window,exists=True):cmds.deleteUI(window)
-    values=preferences();cmds.window(window,title=tr('ReaPencil — 고속 프리뷰'),widthHeight=(500,380),sizeable=False)
+    values=preferences()
+    from . import fast_targets
+    if _library is not None:fast_targets.sync()
+    unused=_target_summary.get('unassigned_shader_targets',[])
+    cmds.window(window,title=tr('ReaPencil — 고속 프리뷰'),widthHeight=(500,475 if unused else 435),sizeable=False)
     cmds.columnLayout(adjustableColumn=True,rowSpacing=8)
     cmds.text(label=tr('라인셋에 등록한 오브젝트와 재질에만 선을 표시합니다.'),align='left',wordWrap=True,height=30)
+    if unused:cmds.text(label=tr('Materials with no assigned faces: ')+', '.join(unused),align='left',wordWrap=True,height=30)
     cmds.text(label=tr('정확한 교차선·개별 브러시 표현은 정밀 뷰포트와 CPU 렌더를 사용하세요.'),align='left',wordWrap=True,height=36)
     width=cmds.floatSliderGrp(label=tr('선 굵기'),field=True,minValue=.5,maxValue=5.,value=values['width'])
     crease=cmds.floatSliderGrp(label=tr('Screen contour sensitivity'),field=True,minValue=.02,maxValue=.8,value=values['crease'])
@@ -79,6 +97,8 @@ def show():
     aa=cmds.optionMenuGrp(label=tr('Anti-aliasing'))
     cmds.menuItem(label=tr('Off'));cmds.menuItem(label='FXAA')
     cmds.optionMenuGrp(aa,e=True,select=2 if values['antialias'] else 1)
+    prepass=cmds.checkBox(label=tr('Alpha Cut Prepass (Maya)'),value=alpha_prepass(),changeCommand=set_alpha_prepass)
+    cmds.text(label=tr('Enable the depth prepass when opacity textures show no contours.'),align='left',wordWrap=True,height=30)
     hard=cmds.checkBox(label=tr('Hard edges'),value=values['hard_edges'])
     marked=cmds.checkBox(label=tr('Authored crease edges'),value=values['crease_edges'])
     def changed(*_):
@@ -95,6 +115,7 @@ def show():
     cmds.colorSliderGrp(color,e=True,changeCommand=changed,dragCommand=changed)
     from .ui import _safe
     cmds.button(label=tr('닫기'),command=lambda *_:cmds.deleteUI(window));cmds.showWindow(window)
+    return dict(window=window,alpha_prepass=prepass)
 
 def disable():
     for panel in cmds.getPanel(type='modelPanel') or []:
@@ -105,7 +126,7 @@ def disable():
 def status():
     panels=[p for p in cmds.getPanel(type='modelPanel') or [] if cmds.modelEditor(p,q=True,rendererOverrideName=True)==NAME]
     return dict(state='ready',enabled=bool(panels),backend='screen_space_gpu',panels=panels,frames=_library.rp_fast_frames() if _library else 0,
-                scope='line-set objects and materials',intersections='screen-space approximation',renderer='CPU final render unchanged')
+                alpha_cut_prepass=alpha_prepass(),unassigned_shader_targets=list(_target_summary.get('unassigned_shader_targets',[])),scope='line-set objects and materials',intersections='screen-space approximation',renderer='CPU final render unchanged')
 
 def shutdown():
     global _library,_plugin

@@ -51,3 +51,8 @@ Choose English or 한국어 in ReaPencil → ReaPencil Settings. The choice is s
 ## Authored edge overlays
 
 Fast Preview options include Hard edges and Authored crease edges. Crease edges use Maya edge crease weights greater than zero, independent of face angle. Both switches are off by default and are saved with the preview preferences. The optional overlay reads deformed positions only for targeted meshes containing marked edges; its cost depends on edge and deformer counts. Line-set object/material targets, visibility, isolate and depth occlusion remain in effect.
+
+
+## 0.8.20 로컬 검토 후보
+
+비상수 선폭·알파 곡선의 CPU 래스터와 저장된 Linear/Spline/Bezier/Break 핸들 평가, 제어점 편집기를 추가했습니다. 기존 기본 선 렌더 경로는 유지됩니다. 코너·폐곡선·분기·교차선의 원본 획 배분, 다중/독립 숨은 브러시 알파, 곡선 벡터 출력과 뷰포트 표현은 제한됩니다. [검토 후보 변경 사항](docs/release_020.md)을 확인하세요. 아직 GitHub에 게시하지 않았습니다.

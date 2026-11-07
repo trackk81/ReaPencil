@@ -12,7 +12,7 @@ def render_segments(segments,camera,depth,depth_planes,visible,hidden,ss,
     packed=hasattr(segments,'arrays')
     styles=segments.styles() if packed else {id(s['settings']):s['settings'] for s in segments}.values()
     for style in styles:
-        if style.get('hidden_lines',False):return None
+        if style.get('hidden_lines',False) or style.get('width_profile') or style.get('alpha_profile'):return None
         if any(float(style.get(k,0))!=0 for k in
                ('dash_length','distance_reduction','width_variation','taper')):return None
     from .native_cpu import library,segments as render

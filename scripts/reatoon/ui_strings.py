@@ -365,3 +365,18 @@ STRINGS["Relative size (640 px width)"]="상대 크기 (가로 640px 기준)"
 STRINGS["Connect collinear dashes (CPU)"]="일직선 대시 연결 (CPU)"
 STRINGS["Opacity (CPU; one visible brush)"]="불투명도 (CPU, 가시 브러시 1개)"
 STRINGS["Width multiplier (CPU)"]="선폭 배율 (CPU)"
+
+STRINGS.update({
+    'Width profile (CPU)':'선폭 곡선 (CPU)', 'Alpha profile (CPU)':'알파 곡선 (CPU)',
+    'Stroke direction (degrees)':'획 방향 (도)',
+    'Stored handles; empty curve = constant 1. CPU raster only.':'저장된 핸들로 계산합니다. 빈 곡선은 상수 1이며 CPU 래스터에 적용됩니다.',
+    'Type':'종류','Left X':'왼쪽 X','Left Y':'왼쪽 Y','Position':'위치','Value':'값','Right X':'오른쪽 X','Right Y':'오른쪽 Y',
+    'Linear':'선형','Spline':'스플라인','Bezier':'베지어','Break':'분리',
+    'Add point':'제어점 추가','Remove selected':'선택 삭제','Reset to constant':'상수로 초기화'
+})
+
+STRINGS.update({'Stroke split angle (degrees)':'획 분할 각도 (도)','Loop direction (0=CW, 1=CCW)':'폐곡선 방향 (0=시계, 1=반시계)','Match Pencil+ profile widths (CPU)':'Pencil+ 곡선 선폭 보정 (CPU)'})
+
+STRINGS.update({'Alpha Cut Prepass (Maya)':'알파 컷 사전 패스 (Maya)','Enable the depth prepass when opacity textures show no contours.':'불투명도 텍스처에 선이 없으면 깊이 사전 패스를 켜세요.'})
+
+STRINGS['Materials with no assigned faces: ']='어느 면에도 적용되지 않은 등록 재질: '

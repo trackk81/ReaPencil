@@ -19,6 +19,8 @@ copy(ROOT/'tools/install.py',Path('tools/install.py'))
 copy(ROOT/'distribution/README_PUBLIC.md',Path('README.md'))
 copy(ROOT/'docs/updates.md',Path('docs/updates.md'))
 copy(ROOT/'docs/release_019.md',Path('docs/release_019.md'))
+copy(ROOT/'docs/release_020.md',Path('docs/release_020.md'))
+copy(ROOT/'docs/release_021.md',Path('docs/release_021.md'))
 for name in ('INSTALL.cmd','CHECK.cmd','SETUP.py','CHECK.py','INSTALL_KO.md'):
     copy(ROOT/'distribution'/name,Path(name))
     if name.endswith('.cmd'):

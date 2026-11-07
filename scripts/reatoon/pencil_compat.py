@@ -53,35 +53,42 @@ def _indices(node,attr):
     return cmds.getAttr(node+'.'+attr,multiIndices=True) or []
 
 
-def _flat_brush_profile(node,prefix,report):
-    if not _get(node,prefix+'Enable',False):return 1.
-    from .brush_profiles import flat_linear_value
+def _brush_profile(node,prefix,report):
+    if not _get(node,prefix+'Enable',False):return 1.,[]
+    from .brush_profiles import flat_linear_value,maya_float_profile,profile_table
+    from .pencil_unknown import saved_profile_points,is_unknown,Reader
+    fields=('CurveType','LeftHandleX','LeftHandleY','ControlPointX','ControlPointY','RightHandleX','RightHandleY')
     rows=[]
-    # Original runtime probes show the Bezier control-point data is evaluated;
-    # the similarly named legacy ramp does not override it.
     for index in _indices(node,prefix+'BezierControlPoints'):
         path=prefix+'BezierControlPoints[%d].'%index+prefix+'Bezier'
-        rows.append(tuple(_get(node,path+attr,None) for attr in ('CurveType','ControlPointX','ControlPointY')))
-    value=flat_linear_value(rows)
-    from .pencil_unknown import saved_profile,is_unknown,Reader
+        rows.append([_get(node,path+attr,None) for attr in fields])
     truncated=False
     if is_unknown(node):
         reader=Reader(node)
         for index in reader.indices(prefix+'BezierControlPoints'):
             plug=reader.plug(prefix+'BezierControlPoints[%d]'%index)
             if plug is not None and not plug.isCompound:truncated=True
-    if truncated or (value is None and (len(rows)<2 or any(None in row for row in rows))):
-        if truncated:value=None
-        saved=saved_profile(node,prefix)
-        if saved is not None:
-            value=flat_linear_value(saved)
-            if value is not None:
-                _issue(report,node,prefix+' compound curve recovered as a saved source-file snapshot by node UUID; animation/procedural inputs and later unsaved curve edits are not evaluated')
-    if value is None:
-        _issue(report,node,prefix+' profile is nonconstant/nonlinear or incomplete; curve was not converted')
-        return 1.
-    _issue(report,node,prefix+' flat linear profile imported as a CPU constant; varying/Bezier/Spline profiles remain unsupported')
-    return value
+    if truncated or len(rows)<2 or any(None in row for row in rows):
+        rows=saved_profile_points(node,prefix)
+        if rows is not None:
+            _issue(report,node,prefix+' compound curve recovered as a saved source-file snapshot by node UUID; animation/procedural inputs and later unsaved curve edits are not evaluated')
+    try:
+        if not rows:raise ValueError('Missing control points')
+        rows=maya_float_profile(rows)
+        for left,right in zip(rows,rows[1:]):
+            if (left[0]!=0 and not left[3]<=left[5]<=right[3]) or (right[0]!=0 and not left[3]<=right[1]<=right[3]):
+                raise ValueError('handles outside adjacent control points: original runtime evaluation is not verified')
+        profile_table(rows)
+    except (TypeError,ValueError) as error:
+        _issue(report,node,prefix+' curve was not converted: '+str(error));return 1.,[]
+    value=flat_linear_value([(r[0],r[3],r[4]) for r in rows])
+    if value is not None:return value,[]
+    _issue(report,node,prefix+' varying curve imported for CPU raster: stored Linear/Spline/Bezier/Break handles; projected-angle corner links and loop direction imported; irregular/subdivided loop origins and exact directional ties remain approximate; viewport and vector parity remain unverified')
+    return 1.,rows
+
+
+def _flat_brush_profile(node,prefix,report):
+    return _brush_profile(node,prefix,report)[0]
 
 
 def _issue(report, node, feature):
@@ -247,6 +254,8 @@ def inspect_scene():
                            'wireframe':'edgeWireframeOn','hard_edges':'edgeSmoothOn',
                            'intersections':'edgeIntersectionOn','self_intersections':'edgeSelfIntersection'}
                 overrides = {key: bool(_get(node, visible+attr, False)) for key, attr in mapping.items()}
+                overrides['open_edges'] &= overrides['outline']
+                overrides['self_intersections'] &= overrides['intersections']
                 overrides['selected_edges'] = False
                 overrides['merge_groups'] = bool(_get(node, visible+'edgeOutlineMergeGroups', False))
                 overrides['lineset_id'] = int(_get(node, 'id', 1))
@@ -268,8 +277,12 @@ def inspect_scene():
                             overrides['line_width'] = max(.1, min(64., float(_get(brush, 'size', 1))))
                             details = _incoming(brush, 'brushDetails')
                             if details:
-                                overrides['brush_size_scale']=_flat_brush_profile(details[0],'sr',report)
-                                alpha_scale=_flat_brush_profile(details[0],'sa',report)
+                                overrides['brush_size_scale'],overrides['width_profile']=_brush_profile(details[0],'sr',report)
+                                alpha_scale,overrides['alpha_profile']=_brush_profile(details[0],'sa',report)
+                                overrides['profile_direction']=float(_get(details[0],'stDirectionAngle',-30.))
+                                overrides['profile_split_angle']=float(_get(details[0],'stLineSplitAngle',90.))
+                                overrides['profile_loop_direction']=int(_get(details[0],'stLoopDirection',0))
+                                overrides['pencil_profile_width']=bool(overrides['width_profile'] or overrides['alpha_profile'])
                             if details and _get(details[0], 'stLineType', 0) == 1:
                                 detail = details[0]
                                 overrides['dash_length'] = float(_get(detail, 'stLength', 5.))
@@ -303,6 +316,9 @@ def inspect_scene():
     eligible=len(report['line_sets'])==1 and len(active)==1
     for item in report['line_sets']:
         overrides=item['overrides']
+        if overrides.get('alpha_profile') and (not eligible or overrides.get('hidden_lines',False)):
+            overrides.pop('alpha_profile',None)
+            _issue(report,item['source'],'varying alpha requires one visible-only LineSet; alpha curve was not converted')
         if overrides.get('line_opacity',1.)!=1. and (not eligible or overrides.get('hidden_lines',False)):
             overrides.pop('line_opacity',None)
             _issue(report,item['source'],'brush opacity requires one visible-only LineSet; opacity was not converted')
