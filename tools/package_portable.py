@@ -13,11 +13,12 @@ def copy(source,relative):
     target=stage/relative;target.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(source,target)
 for folder in ('scripts','plug-ins','rendererDesc'):
     for path in (ROOT/folder).rglob('*'):
-        if path.is_file() and path.suffix in ('.py','.mel','.mll','.xml','.ogsfx') and '__pycache__' not in path.parts:
+        if path.is_file() and path.suffix in ('.py','.mel','.mll','.dll','.xml','.ogsfx') and '__pycache__' not in path.parts:
             copy(path,path.relative_to(ROOT))
 copy(ROOT/'tools/install.py',Path('tools/install.py'))
 copy(ROOT/'distribution/README_PUBLIC.md',Path('README.md'))
 copy(ROOT/'docs/updates.md',Path('docs/updates.md'))
+copy(ROOT/'docs/release_019.md',Path('docs/release_019.md'))
 for name in ('INSTALL.cmd','CHECK.cmd','SETUP.py','CHECK.py','INSTALL_KO.md'):
     copy(ROOT/'distribution'/name,Path(name))
     if name.endswith('.cmd'):

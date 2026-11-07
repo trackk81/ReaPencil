@@ -360,3 +360,8 @@ STRINGS["GPU preview limited to line-set objects and materials."]="라인셋에 
 STRINGS["Use precise preview and CPU rendering for exact intersections and individual brushes."]="정확한 교차선·개별 브러시 표현은 정밀 뷰포트와 CPU 렌더를 사용하세요."
 
 STRINGS.update({"Authored crease edges":"크리즈 지정 에지","Screen contour sensitivity":"화면 윤곽 감도"})
+STRINGS["Dash gap (-1 = length)"]="대시 간격 (-1 = 대시 길이)"
+STRINGS["Relative size (640 px width)"]="상대 크기 (가로 640px 기준)"
+STRINGS["Connect collinear dashes (CPU)"]="일직선 대시 연결 (CPU)"
+STRINGS["Opacity (CPU; one visible brush)"]="불투명도 (CPU, 가시 브러시 1개)"
+STRINGS["Width multiplier (CPU)"]="선폭 배율 (CPU)"

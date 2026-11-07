@@ -11,6 +11,10 @@ Windows x64 / Autodesk Maya 2025용 독립 NPR 라인 플러그인입니다.
 
 Pencil+의 전체 기능이나 동일한 렌더 결과를 보장하지 않습니다. PSOFT의 실행 파일, 스크립트, 아이콘, 셰이더는 포함하지 않습니다. Maya SDK 헤더·라이브러리는 저장소에 포함하지 않으며, 네이티브 모듈을 다시 빌드하려면 Maya 2025 SDK와 MSVC가 필요합니다.
 
+## 0.8.19 변경
+
+CPU 렌더 준비·교차선·가림 처리를 개선하고 커스텀 해상도의 픽셀 비율 문제를 수정했습니다. 대시 간격·상대 크기, 제한된 단일 브러시 불투명도 및 평탄한 Linear profile 이관을 추가했습니다. Pencil+ 없는 환경의 저장 프로파일 복원은 검증한 ASCII/FOR8 compact 형식에 한정됩니다. 전체 Bezier/Spline·브러시 합성·획 위상 동등성은 아직 미지원입니다. 자세한 범위는 [0.8.19 변경 사항](docs/release_019.md)을 확인하세요.
+
 ## 처음 설치
 
 [Releases](https://github.com/trackk81/ReaPencil/releases/latest)에서 `ReaPencil-버전-Maya2025-Windows-x64.zip`을 다운로드하세요. GitHub의 자동 생성 Source code ZIP은 설치 배포본이 아닙니다.

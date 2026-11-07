@@ -18,11 +18,11 @@ def prepare():
         (stage/name).unlink(missing_ok=True)
     entries=[]
     for folder in ('scripts','plug-ins','rendererDesc'):
-        entries.extend(p for p in (ROOT/folder).rglob('*') if p.is_file() and p.suffix in ('.py','.mel','.mll','.ogsfx','.xml') and '__pycache__' not in p.parts)
-    entries.extend(ROOT/p for p in ['native/viewport_retained.cpp','native/viewport_fast.cpp','native/viewport_draw.cpp','native/render_view.cpp','native/mesh_export.cpp',
-        'tools/install.py','tools/package_portable.py','tools/publish_github.py','tools/build_native.ps1','tools/build_mesh_native.ps1','tools/build_image_native.ps1',
+        entries.extend(p for p in (ROOT/folder).rglob('*') if p.is_file() and p.suffix in ('.py','.mel','.mll','.dll','.ogsfx','.xml') and '__pycache__' not in p.parts)
+    entries.extend(ROOT/p for p in ['native/viewport_retained.cpp','native/viewport_fast.cpp','native/viewport_draw.cpp','native/render_view.cpp','native/mesh_export.cpp','native/cpu_geometry.cpp','native/cpu_intersections.h','native/cpu_visibility.h',
+        'tools/install.py','tools/package_portable.py','tools/publish_github.py','tools/build_native.ps1','tools/build_mesh_native.ps1','tools/build_cpu_native.ps1','tools/build_image_native.ps1',
         'distribution/README_PUBLIC.md','distribution/INSTALL_KO.md','distribution/INSTALL.cmd','distribution/CHECK.cmd','distribution/SETUP.py','distribution/CHECK.py',
-        'docs/updates.md','docs/release_085.md','docs/release_086.md','docs/release_087.md','docs/release_088.md','docs/release_089.md','docs/release_013.md','docs/release_015.md','tests/test_i18n.py','tests/test_updates.py','tests/test_view_scope.py','tests/test_retained_geometry.py'])
+        'docs/updates.md','docs/release_085.md','docs/release_086.md','docs/release_087.md','docs/release_088.md','docs/release_089.md','docs/release_013.md','docs/release_015.md','docs/release_016.md','docs/release_017.md','docs/release_018.md','docs/release_019.md','tests/test_render_optimization.py','tests/test_i18n.py','tests/test_updates.py','tests/test_view_scope.py','tests/test_retained_geometry.py','tests/test_brush_profiles.py','tests/test_line_styles.py','tests/test_renderer.py'])
     expected=set()
     # Large unchanged upstream wheels are release assets, not Git history.
     for wheel in (ROOT/'distribution/wheels').glob('*.whl'):entries.append(wheel)
@@ -81,7 +81,7 @@ def publish(stage,notes):
     import ast
     tree=ast.parse((ROOT/'scripts/reatoon/__init__.py').read_text(encoding='utf-8'))
     version=next(ast.literal_eval(n.value) for n in tree.body if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='__version__' for t in n.targets))
-    if git('diff','--cached','--name-only'):git('commit','-m','ReaPencil '+version+': exclude registered objects and shaders from target pickers')
+    if git('diff','--cached','--name-only'):git('commit','-m','ReaPencil '+version+': CPU rendering, custom resolution and brush compatibility improvements')
     git('push','-u','origin','main');head=git('rev-parse','HEAD')
     prefix='/repos/'+REPO;tag='v'+version
     try:release=api(prefix+'/releases/tags/'+tag)

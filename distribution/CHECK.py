@@ -77,7 +77,10 @@ try:
     im=QImage(result['paths']['beauty']).convertToFormat(QImage.Format_RGBA8888)
     pixels=np.frombuffer(im.constBits(),np.uint8,count=im.sizeInBytes()).reshape(im.height(),im.bytesPerLine())[:,:im.width()*4].reshape(im.height(),im.width(),4)
     assert np.any(pixels[:,:,3]>0),'CPU render contains no lines'
-    report['checks']['cpu_render']=dict(seconds=time.perf_counter()-start,image=result['paths']['beauty'],coverage_pixels=int(np.count_nonzero(pixels[:,:,3])))
+    report['checks']['cpu_render']=dict(seconds=time.perf_counter()-start,image=result['paths']['beauty'],coverage_pixels=int(np.count_nonzero(pixels[:,:,3])),depth_backend=result['stats'].get('depth_backend'),segment_backend=result['stats'].get('segment_backend'))
+    from reatoon.native_cpu import library
+    assert library() is not None,'Native CPU library missing or unloadable'
+    report['checks']['native_cpu_library']='loaded'
     print('Checking saved Pencil nodes without the Pencil runtime...',flush=True)
     assert 'Pencil4' not in (cmds.pluginInfo(query=True,listPlugins=True) or [])
     saved=Path(os.environ['MAYA_APP_DIR'])/'saved_pencil.ma'

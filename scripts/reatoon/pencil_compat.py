@@ -53,6 +53,37 @@ def _indices(node,attr):
     return cmds.getAttr(node+'.'+attr,multiIndices=True) or []
 
 
+def _flat_brush_profile(node,prefix,report):
+    if not _get(node,prefix+'Enable',False):return 1.
+    from .brush_profiles import flat_linear_value
+    rows=[]
+    # Original runtime probes show the Bezier control-point data is evaluated;
+    # the similarly named legacy ramp does not override it.
+    for index in _indices(node,prefix+'BezierControlPoints'):
+        path=prefix+'BezierControlPoints[%d].'%index+prefix+'Bezier'
+        rows.append(tuple(_get(node,path+attr,None) for attr in ('CurveType','ControlPointX','ControlPointY')))
+    value=flat_linear_value(rows)
+    from .pencil_unknown import saved_profile,is_unknown,Reader
+    truncated=False
+    if is_unknown(node):
+        reader=Reader(node)
+        for index in reader.indices(prefix+'BezierControlPoints'):
+            plug=reader.plug(prefix+'BezierControlPoints[%d]'%index)
+            if plug is not None and not plug.isCompound:truncated=True
+    if truncated or (value is None and (len(rows)<2 or any(None in row for row in rows))):
+        if truncated:value=None
+        saved=saved_profile(node,prefix)
+        if saved is not None:
+            value=flat_linear_value(saved)
+            if value is not None:
+                _issue(report,node,prefix+' compound curve recovered as a saved source-file snapshot by node UUID; animation/procedural inputs and later unsaved curve edits are not evaluated')
+    if value is None:
+        _issue(report,node,prefix+' profile is nonconstant/nonlinear or incomplete; curve was not converted')
+        return 1.
+    _issue(report,node,prefix+' flat linear profile imported as a CPU constant; varying/Bezier/Spline profiles remain unsupported')
+    return value
+
+
 def _issue(report, node, feature):
     item = node + ': ' + feature
     if item not in report['unsupported']:
@@ -198,13 +229,12 @@ def inspect_scene():
     if len({_get(line, 'overSampling', 2) for line in active}) > 1:
         _issue(report, 'scene', 'per-Line oversampling uses one global frame sampling value')
     for line in lines:
-        if _get(line, 'lineSize', 1) != 0:
-            _issue(report, line, 'lineSize mode %s: brush size interpreted as pixels; relative-resolution scaling not reproduced' % _get(line, 'lineSize', 1))
+        relative_size = int(_get(line, 'lineSize', 1)) == 1
         report['settings']['supersample'] = max(1, min(4, int(_get(line, 'overSampling', 2))))
         report['settings']['seed'] = max(0, int(_get(line, 'randomSeed', 0)))
         report['lines'].append({'source': line, 'source_uuid': _uuid(line), 'output_to_elements_only': bool(_get(line, 'outputToRE', False)), 'active': bool(_get(line, 'active', True)),
                                 'priority': int(_get(line, 'renderPriority', 0)),
-                                'overrides': {'seed': report['settings']['seed']}})
+                                'overrides': {'seed': report['settings']['seed'], 'relative_line_size': relative_size}})
         for index in _indices(line,'lineSets'):
             for node in _incoming(line, 'lineSets[%d]' % index):
                 from . import pencil_unknown
@@ -228,6 +258,7 @@ def inspect_scene():
                     brushes = _incoming(node, prefix+'brushSettings')
                     if brushes:
                         brush = brushes[0]
+                        alpha_scale=1.
                         overrides[color_key] = _get(brush, 'color', [0,0,0])
                         if cmds.listConnections(brush,source=True,destination=False):
                             _issue(report,node,'brush maps/detail/animated inputs sampled or ignored')
@@ -235,8 +266,26 @@ def inspect_scene():
                             if not .1 <= float(_get(brush,'size',1)) <= 64:
                                 _issue(report,node,'brush size clamped to 0.1..64 pixels')
                             overrides['line_width'] = max(.1, min(64., float(_get(brush, 'size', 1))))
-                        if _get(brush,'blendAmount',1) != 1 or _get(brush,'blendMode',0):
-                            _issue(report,node,'brush blending/opacity')
+                            details = _incoming(brush, 'brushDetails')
+                            if details:
+                                overrides['brush_size_scale']=_flat_brush_profile(details[0],'sr',report)
+                                alpha_scale=_flat_brush_profile(details[0],'sa',report)
+                            if details and _get(details[0], 'stLineType', 0) == 1:
+                                detail = details[0]
+                                overrides['dash_length'] = float(_get(detail, 'stLength', 5.))
+                                overrides['dash_gap'] = float(_get(detail, 'stSpace', 5.))
+                                # Only the zero split-angle fixture currently
+                                # supports this partial connection mapping.
+                                # Other source angles keep their prior output
+                                # until corner/loop phase is implemented.
+                                overrides['connect_collinear_dashes'] = float(_get(detail, 'stLineSplitAngle', 90.)) == 0.
+                                _issue(report, detail, 'CPU dash length/space and collinear polygon connections imported; corner/loop phase, split-angle behavior, randomization and viewport parity are not reproduced')
+                        if _get(brush,'blendMode',0):
+                            _issue(report,node,'brush blend mode and its opacity are not reproduced')
+                        elif prefix == visible:
+                            overrides['line_opacity']=float(_get(brush,'blendAmount',1.))*alpha_scale
+                        elif _get(brush,'blendAmount',1.)!=1.:
+                            _issue(report,node,'independent hidden brush opacity is not implemented')
                 if overrides['hidden_lines']:
                     _issue(report,node,'independent hidden-edge filters/width; shared filters are used')
                 for attr in ('edgeObjectOn','edgeSelectedOn','sizeReductionOn','alphaReductionOn'):
@@ -249,6 +298,16 @@ def inspect_scene():
                 report['line_sets'].append({'source':node,'source_uuid':_uuid(node),'line':line,
                                            'active': bool(_get(node, 'on', True)),
                                            'members':targets,'shaders':_shader_targets(_incoming(node, 'materials'), report, node), 'overrides':overrides})
+    # Safe partial mapping: one normal visible brush only. Other configurations
+    # retain the previous output and receive an explicit compatibility issue.
+    eligible=len(report['line_sets'])==1 and len(active)==1
+    for item in report['line_sets']:
+        overrides=item['overrides']
+        if overrides.get('line_opacity',1.)!=1. and (not eligible or overrides.get('hidden_lines',False)):
+            overrides.pop('line_opacity',None)
+            _issue(report,item['source'],'brush opacity requires one visible-only LineSet; opacity was not converted')
+        elif overrides.get('line_opacity',1.)!=1.:
+            _issue(report,item['source'],'Normal brush opacity imported for single-style CPU raster/SVG; viewport and mixed/hidden brush opacity are not reproduced')
     _inspect_extras(report)
     from . import pencil_unknown
     unknown=[n for kind in pencil_unknown.SCHEMA for n in _nodes(kind) if pencil_unknown.is_unknown(n)]

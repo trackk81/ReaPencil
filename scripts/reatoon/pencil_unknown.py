@@ -19,6 +19,31 @@ def kind(node):
 def is_unknown(node):
     return cmds.nodeType(node) in ('unknown','unknownDag','unknownTransform') and kind(node) in SCHEMA
 
+
+def saved_profile(node,prefix):
+    """Saved-file snapshot fallback, never an evaluation of source MEL."""
+    if not is_unknown(node) or kind(node)!='PencilBrushDetail':return None
+    if cmds.listConnections(node,source=True,destination=False):return None
+    path=cmds.file(query=True,sceneName=True)
+    if not path:return None
+    from pathlib import Path
+    suffix=Path(path).suffix.lower()
+    if suffix=='.ma':from .ascii_brush_profiles import read_profiles
+    elif suffix=='.mb':from .binary_brush_profiles import read_profiles
+    else:return None
+    try:
+        uid=(cmds.ls(node,uuid=True) or [''])[0].lower()
+        rows=read_profiles(path).get(uid,{}).get({'sr':'srcps','sa':'sacps'}[prefix])
+    except (OSError,ValueError):return None
+    if not rows:return None
+    return [(row[0],row[3],row[4]) for _,row in sorted(rows.items())]
+
+
+def saved_ascii_profile(node,prefix):
+    """Compatibility entry for existing ASCII-specific diagnostics."""
+    if not cmds.file(query=True,sceneName=True).lower().endswith('.ma'):return None
+    return saved_profile(node,prefix)
+
 class Reader:
     def __init__(self,node):
         self.node=node;self.kind=kind(node);self.schema=SCHEMA.get(self.kind,{})

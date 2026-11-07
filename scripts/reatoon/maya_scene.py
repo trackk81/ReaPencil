@@ -11,6 +11,10 @@ from maya.api import OpenMaya as om
 
 DEFAULT_SETTINGS = {
     "enabled_smooth_mesh": False,
+    "relative_line_size": False,
+    "connect_collinear_dashes": False,
+    "line_opacity": 1.0,
+    "brush_size_scale": 1.0,
     "width": 640, "height": 480, "supersample": 2,
     "background": [1.0, 1.0, 1.0], "line_width": 1.5,
     "line_color": [0.05, 0.05, 0.08], "hidden_lines": False,
@@ -21,7 +25,7 @@ DEFAULT_SETTINGS = {
     "merge_groups": True, "lineset_id": 1,
     "intersection_tolerance": 1e-7,
     "depth_bias": 0.002, "distance_reduction": 0.0,
-    "width_variation": 0.0, "taper": 0.0, "dash_length": 0.0, "seed": 1,
+    "width_variation": 0.0, "taper": 0.0, "dash_length": 0.0, "dash_gap": -1.0, "seed": 1,
 }
 
 
@@ -63,11 +67,11 @@ def validate_settings(values, partial=False):
         raise ValueError("Settings must be an object.")
     result = {} if partial else dict(DEFAULT_SETTINGS)
     ranges = {"width": (16, 4096), "height": (16, 4096), "supersample": (1, 4),
-              "line_width": (0.1, 64), "crease_angle": (0, 180),
+              "line_width": (0.1, 64), "line_opacity": (0, 1), "brush_size_scale": (0, 1), "crease_angle": (0, 180),
               "intersection_tolerance": (1e-12, 0.01),
               "depth_bias": (0, 1), "distance_reduction": (0, 1000),
               "width_variation": (0, 1), "taper": (0, 1),
-              "dash_length": (0, 1000), "seed": (0, 2147483647), "lineset_id": (1, 8)}
+              "dash_length": (0, 10000), "dash_gap": (-1, 10000), "seed": (0, 2147483647), "lineset_id": (1, 8)}
     for key, value in values.items():
         if key not in DEFAULT_SETTINGS:
             raise ValueError("Unknown setting: " + str(key))
@@ -92,8 +96,9 @@ def validate_settings(values, partial=False):
                     raise ValueError(key + " must be an integer")
                 value = int(value)
         result[key] = value
-    if not partial and result["width"] * result["height"] * result["supersample"] ** 2 > 16777216:
-        raise ValueError("Reference renderer budget exceeded: reduce resolution or supersampling (16M samples).")
+    if not partial:
+        from .render_limits import check_frame_samples
+        check_frame_samples(result['width'],result['height'],result['supersample'])
     return result
 
 
@@ -319,7 +324,7 @@ def _line_membership(path, line_sets):
     return chosen, edges
 
 
-def export_scene(camera=None, settings=None, camera_override=None, include_normals=True, geometry_purpose="render", include_materials=True, as_arrays=False, mesh_filter=None, geometry_cache=None):
+def export_scene(camera=None, settings=None, camera_override=None, include_normals=True, geometry_purpose="render", include_materials=True, as_arrays=False, mesh_filter=None, geometry_cache=None, mesh_ready=None):
     from . import line_graph
     from . import smooth_geometry
     from . import alpha_boundary
@@ -358,13 +363,30 @@ def export_scene(camera=None, settings=None, camera_override=None, include_norma
             continue
         source_fn = om.MFnMesh(path)
         alpha_config=alpha_boundary.configuration(name)
+        shading_engines, ids = source_fn.getConnectedShaders(path.instanceNumber())
+        chosen, selected = _line_membership(path, line_sets)
+        passes = None
+        if graph_enabled:
+            shader_names = []
+            for sg in shading_engines:
+                sources = cmds.listConnections(om.MFnDependencyNode(sg).name() + ".surfaceShader", source=True, destination=False) or []
+                shader_names.append(sources[0] if sources else "")
+            passes, selected = line_graph.resolve_mesh(path, source_fn.numPolygons, shader_names, ids, graph)
+        uniform=(geometry_purpose=='render' and not need_edge_provenance and not alpha_config
+                 and (not len(ids) or min(ids)==max(ids))
+                 and all(len(set(item['face_line_sets']))<=1 for item in (passes or [])))
         evaluated=None
         cached=(geometry_cache or {}).get(name) if geometry_purpose=='viewport' and as_arrays and not need_edge_provenance and not alpha_config else None
         if cached is not None:evaluated=cached['geometry']
         if evaluated is None and as_arrays and not need_edge_provenance and not include_normals and not alpha_config:
             from . import native_mesh
             try:
-                evaluated=native_mesh.evaluate(path,smooth_geometry.level(path,settings['enabled_smooth_mesh'],geometry_purpose),purpose=geometry_purpose)
+                divisions=smooth_geometry.level(path,settings['enabled_smooth_mesh'],geometry_purpose)
+                if geometry_purpose=='render':
+                    from . import render_geometry_cache
+                    evaluated=render_geometry_cache.evaluate(path,divisions,uniform=uniform)
+                else:
+                    evaluated=native_mesh.evaluate(path,divisions,purpose=geometry_purpose)
             except RuntimeError as error:
                 if 'exporter is unavailable' not in str(error):raise
                 warnings.append(str(error)+'; using Maya Python geometry evaluation')
@@ -387,20 +409,11 @@ def export_scene(camera=None, settings=None, camera_override=None, include_norma
             triangle_faces = np.repeat(np.arange(len(triangle_counts)),np.asarray(triangle_counts,dtype=np.int64))
         if not as_arrays:
             triangles=triangles.tolist();triangle_faces=triangle_faces.tolist()
-        shading_engines, ids = source_fn.getConnectedShaders(path.instanceNumber())
         materials = [(_material(om.MFnDependencyNode(sg).name(), warnings) if include_materials else
                       {'name':om.MFnDependencyNode(sg).name()}) for sg in shading_engines]
         if not materials:
             materials = [{"name": "unassigned", "color": [.5, .5, .5], "shadow_color": [.19, .19, .19],
                           "highlight_color": [.8, .8, .8], "threshold": .5, "highlight_threshold": .85, "gradation_offset": 0, "opacity": 1}]
-        chosen, selected = _line_membership(path, line_sets)
-        passes = None
-        if graph_enabled:
-            shader_names = []
-            for sg in shading_engines:
-                sources = cmds.listConnections(om.MFnDependencyNode(sg).name() + ".surfaceShader", source=True, destination=False) or []
-                shader_names.append(sources[0] if sources else "")
-            passes, selected = line_graph.resolve_mesh(path, evaluated["base_face_count"], shader_names, ids, graph)
         hard_edges, selected_edges = evaluated.get('hard_edges',[]), []
         if fn is None and selected:raise RuntimeError('Native export cannot omit selected-edge provenance')
         for edge in range(fn.numEdges if fn is not None else 0):
@@ -410,11 +423,14 @@ def export_scene(camera=None, settings=None, camera_override=None, include_norma
                 selected_edges.append(list(fn.getEdgeVertices(edge)))
         mesh = {"name": name, "vertices": evaluated["world_points"], "faces": faces,
                 "triangles": triangles, "triangle_faces": triangle_faces,
-                "material_ids": np.maximum(0,np.asarray(ids,dtype=np.int64)[evaluated['base_face_ids']]).tolist() if len(ids) else [0]*len(faces), "materials": materials,
+                "material_ids": [] if geometry_purpose=="render" and fn is None else (np.maximum(0,np.asarray(ids,dtype=np.int64)[evaluated['base_face_ids']]).tolist() if len(ids) else [0]*len(faces)), "materials": materials,
                 "hard_edges": hard_edges, "selected_edges": selected_edges,
                 "smooth_level": evaluated["level"], "geometry_purpose": geometry_purpose,
                 "base_face_count": evaluated["base_face_count"], "base_vertex_count": evaluated["base_vertex_count"],
                 "base_edge_count": evaluated["base_edge_count"]}
+        if geometry_purpose=='render' and fn is None:
+            mesh['_render_geometry']=evaluated
+            mesh['material_ids']=np.maximum(0,np.asarray(ids,dtype=np.int64)[evaluated['base_face_ids']]) if len(ids) else np.zeros(len(faces),np.int64)
         if geometry_purpose=='viewport' and fn is None:
             mesh['_native_evaluated']=evaluated
             if cached is not None and cached.get('topology') is not None:mesh['_gpu_topology']=cached['topology']
@@ -449,6 +465,7 @@ def export_scene(camera=None, settings=None, camera_override=None, include_norma
                 result['alpha_empty']=True
                 continue
         result["meshes"].append(mesh)
+        if mesh_ready is not None:mesh_ready(mesh)
     result["warnings"] = list(dict.fromkeys(warnings))
     from . import render_elements
     result["merge_groups"] = line_graph.export_merge_groups(result["meshes"])
@@ -465,7 +482,51 @@ def render_scene(output_prefix, camera=None, settings=None, write_scene=False, a
     started=time.perf_counter()
     device_aspect=float(cmds.getAttr('defaultResolution.deviceAspectRatio'))
     camera_data=_camera(camera,device_aspect)
-    scene = export_scene(camera, values,camera_override=camera_data,include_normals=False, include_materials=False,as_arrays=True)
+    from concurrent.futures import ThreadPoolExecutor
+    from .intersections import _prepare, _native_function
+    native,_=_native_function('auto')
+    from .native_cpu import library
+    prepass=None
+    if native is not None and library() is not None and values.get('compiled_depth',True):
+        ss=int(values['supersample']);w=int(values['width'])*ss;h=int(values['height'])*ss
+        # The same production resolution guard applies before allocation.
+        from .render_limits import check_frame_samples
+        from .line_graph import list_merge_groups
+        check_frame_samples(values['width'],values['height'],ss)
+        prepass=dict(camera=renderer._camera(camera_data,w,h),depth=np.full((h,w),np.inf),
+                     planes=np.zeros((h,w,3)),owners=np.full((h,w),-1,np.int32) if list_merge_groups() else None,
+                     counts=[],meshes=[],outlines=[])
+    pending=[];depth_tasks=[]
+    def prepare_cpu(mesh,index):
+        edges=renderer._render_edges(mesh)
+        if native is not None:_prepare(mesh,native_bvh=True)
+        if prepass is not None:
+            from .cpu_outline import outline_edges
+            prepass['outlines'][index]=outline_edges(mesh,prepass['camera'],edges)
+    def prepare_depth(mesh,index):
+        from .cpu_depth import rasterize_mesh
+        camera=prepass['camera']
+        vertices=(np.asarray(mesh['vertices'],np.float64)-camera['eye']) @ camera['basis'].T
+        result=rasterize_mesh(vertices,mesh['triangles'],camera,prepass['depth'],prepass['planes'],prepass['owners'],index)
+        mesh['_render_camera_vertices']=vertices
+        prepass['counts'].append(result['triangles']);prepass['backend']=result['backend']
+    # One ordered depth worker retains mesh ownership on exact depth ties.
+    # All Maya API evaluation remains on the main thread. Both stages count
+    # toward the measured render; no preparation is moved outside the timer.
+    with ThreadPoolExecutor(max_workers=3) as workers,ThreadPoolExecutor(max_workers=1) as depth_worker:
+        def ready(mesh):
+            geometry=mesh.get('_render_geometry')
+            if geometry is not None:
+                if '_cpu_triangle_indices' not in geometry:geometry['_cpu_triangle_indices']=np.asarray(mesh['triangles'],np.int64)
+                mesh['triangles']=geometry['_cpu_triangle_indices']
+            index=len(prepass['meshes']) if prepass is not None else 0
+            if prepass is not None:
+                prepass['meshes'].append(id(mesh));prepass['outlines'].append(None)
+                depth_tasks.append(depth_worker.submit(prepare_depth,mesh,index))
+            if '_render_geometry' in mesh or prepass is not None:pending.append(workers.submit(prepare_cpu,mesh,index))
+        scene = export_scene(camera, values,camera_override=camera_data,include_normals=False,
+                             include_materials=False,as_arrays=True,mesh_ready=ready)
+        for task in pending+depth_tasks:task.result()
     export_finished=time.perf_counter()
     values["line_sets"] = scene["line_sets"]
     # Maya's RevToon renderer is a line pass. Surface shading remains available
@@ -482,9 +543,14 @@ def render_scene(output_prefix, camera=None, settings=None, write_scene=False, a
     if write_scene:
         scene_path = output_prefix + "_scene.json"
         with open(scene_path, "w", encoding="utf-8") as stream:
-            json.dump({"format": "reatoon-scene", "version": 1, "scene": scene, "settings": values}, stream, separators=(',',':'),default=lambda value:value.tolist())
+            json.dump({"format": "reatoon-scene", "version": 1, "scene": dict(scene,meshes=[{k:v for k,v in m.items() if not k.startswith("_")} for m in scene["meshes"]]), "settings": values}, stream, separators=(',',':'),default=lambda value:value.tolist())
     snapshot_finished=time.perf_counter()
-    result = renderer.render(scene, output_prefix, values)
+    from . import render_geometry_cache
+    try:
+        result = renderer.render(scene, output_prefix, values,depth_prepass=prepass)
+    finally:
+        render_geometry_cache.trim()
+    result["geometry_cache"]=render_geometry_cache.stats()
     result['maya_timings_seconds']=dict(export=export_finished-started,snapshot=snapshot_finished-export_finished,
         render=time.perf_counter()-snapshot_finished,total=time.perf_counter()-started)
     result["scene_path"] = scene_path

@@ -15,9 +15,13 @@ def render_segments(segments,camera,depth,depth_planes,visible,hidden,ss,
         if style.get('hidden_lines',False):return None
         if any(float(style.get(k,0))!=0 for k in
                ('dash_length','distance_reduction','width_variation','taper')):return None
-    from .accelerator import enable
-    enable()
-    from ._segment_kernel import render
+    from .native_cpu import library,segments as render
+    backend="native-cpu-segments"
+    if library() is None:
+        from .accelerator import enable
+        enable()
+        from ._segment_kernel import render
+        backend="numba-cpu-segments"
     count=len(segments)
     if packed:
         points,widths,biases,colors,only,enabled=segments.arrays()
@@ -45,5 +49,5 @@ def render_segments(segments,camera,depth,depth_planes,visible,hidden,ss,
                             a=[ax,ay],b=[bx,by],mesh=segment['mesh'],
                             features=segment['features'],settings=style))
     return dict(vectors=vectors,visible_segments=visible_count,hidden_segments=0,
-                classified_edges=count,backend='numba-cpu-segments',
+                classified_edges=count,backend=backend,
                 visibility_refinement=dict(checked_samples=int(visibility_stats[0]),hidden_samples=int(visibility_stats[1])))

@@ -28,6 +28,13 @@
 #include <cstdint>
 #include <cmath>
 #include <algorithm>
+#include <chrono>
+#include <sstream>
+#include <cstring>
+
+// Maya commands execute serially on the main thread. The next export replaces
+// this buffer; Python copies it before returning or evaluating another mesh.
+static thread_local std::vector<char> exportBuffer;
 
 static void check(MStatus s) {if(!s)throw std::runtime_error(s.errorString().asChar());}
 static MPlug plug(MFnDependencyNode& node,const char* name) {
@@ -83,15 +90,21 @@ static std::vector<uint32_t> ints(const MIntArray& input) {
 class ExportMesh: public MPxCommand {
 public:
     static void* creator(){return new ExportMesh;}
-    static MSyntax syntax(){MSyntax s;s.addFlag("-m","-mesh",MSyntax::kString);s.addFlag("-d","-divisions",MSyntax::kLong);s.addFlag("-o","-output",MSyntax::kString);s.addFlag("-p","-purpose",MSyntax::kString);return s;}
+    static MSyntax syntax(){MSyntax s;s.addFlag("-m","-mesh",MSyntax::kString);s.addFlag("-d","-divisions",MSyntax::kLong);s.addFlag("-o","-output",MSyntax::kString);s.addFlag("-p","-purpose",MSyntax::kString);s.addFlag("-u","-uniform",MSyntax::kBoolean);s.addFlag("-mem","-memory",MSyntax::kBoolean);s.addFlag("-pr","-profile",MSyntax::kBoolean);return s;}
     bool isUndoable()const override{return false;}
     MStatus doIt(const MArgList& args)override {
         try {
-            MStatus status;MArgDatabase db(syntax(),args,&status);check(status);
+            // MArgDatabase retains syntax storage: keep it alive through every flag query.
+            MStatus status;MSyntax commandSyntax=syntax();MArgDatabase db(commandSyntax,args,&status);check(status);
+            auto started=std::chrono::steady_clock::now();
+            MDoubleArray timings;auto mark=[&](){timings.append(std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count());};
             MString meshName,filename,purpose="render";int divisions=0;
-            check(db.getFlagArgument("-m",0,meshName));check(db.getFlagArgument("-o",0,filename));
+            check(db.getFlagArgument("-m",0,meshName));
+            bool memory=false,profile=false;if(db.isFlagSet("-mem"))check(db.getFlagArgument("-mem",0,memory));if(db.isFlagSet("-pr"))check(db.getFlagArgument("-pr",0,profile));
+            if(!memory)check(db.getFlagArgument("-o",0,filename));
             if(db.isFlagSet("-d"))check(db.getFlagArgument("-d",0,divisions));
             if(db.isFlagSet("-p"))check(db.getFlagArgument("-p",0,purpose));
+            bool uniform=false;if(db.isFlagSet("-u"))check(db.getFlagArgument("-u",0,uniform));
             if(purpose!="render"&&purpose!="viewport")throw std::runtime_error("Invalid geometry purpose");
             if(divisions<0||divisions>8)throw std::runtime_error("Invalid subdivision level");
             MSelectionList selection;check(selection.add(meshName));MDagPath path;check(selection.getDagPath(0,path));
@@ -103,24 +116,37 @@ public:
             if(divisions) {
                 uint64_t expected=baseIndices.length();for(int i=1;i<divisions;++i)expected*=4;
                 if(expected>2000000)throw std::runtime_error("Subdivision exceeds the 2 million faces per-mesh budget");
-                MFnMeshData data;copyOwner=data.create(&status);check(status);
+                MFnMeshData data;
+                MMeshSmoothOptions directOptions;check(source.getSmoothMeshDisplayOptions(directOptions));directOptions.setDivisions(divisions);directOptions.setSmoothUVs(false);
+                if(uniform&&!legacyCreases(source,purpose)) {
+                    smoothOwner=data.create(&status);check(status);
+                    evaluated=source.generateSmoothMesh(smoothOwner,&directOptions,&status);check(status);
+                } else {
+                copyOwner=data.create(&status);check(status);
                 MFnMesh copier;MObject copyObject=copier.copy(source.object(),copyOwner,&status);check(status);
                 MFnMesh copy(copyObject,&status);check(status);MStringArray sets;check(copy.getUVSetNames(sets));
+                if(uniform)for(unsigned i=0;i<sets.length();++i)check(copy.clearUVs(&sets[i]));
+                if(!uniform) {
                 if(!sets.length())throw std::runtime_error("No UV set for subdivision provenance");uvSet=sets[0];
                 check(copy.clearUVs(&uvSet));MFloatArray u,v;MIntArray uvIds;
                 u.setLength(baseIndices.length());v.setLength(baseIndices.length());uvIds.setLength(baseIndices.length());
                 unsigned cursor=0;for(unsigned f=0;f<baseCounts.length();++f)for(int c=0;c<baseCounts[f];++c){u[cursor]=float(f);v[cursor]=float(c);uvIds[cursor]=cursor;++cursor;}
                 check(copy.setUVs(u,v,&uvSet));check(copy.assignUVs(baseCounts,uvIds,&uvSet));
+                }
                 MMeshSmoothOptions options;check(source.getSmoothMeshDisplayOptions(options));options.setDivisions(divisions);options.setSmoothUVs(false);
                 if(legacyCreases(source,purpose))evaluated=legacySmooth(source,copyOwner,divisions,smoothOwner);
                 else {smoothOwner=data.create(&status);check(status);evaluated=copy.generateSmoothMesh(smoothOwner,&options,&status);check(status);}
+                }
             }
+            mark();
             MFnMesh fn(evaluated,&status);check(status);
             MPointArray points;check(fn.getPoints(points,MSpace::kObject));MMatrix matrix=path.inclusiveMatrix(&status);check(status);
             std::vector<double> xyz(points.length()*3);for(unsigned i=0;i<points.length();++i){MPoint p=points[i]*matrix;xyz[i*3]=p.x;xyz[i*3+1]=p.y;xyz[i*3+2]=p.z;}
+            mark();
             MIntArray counts,indices,triCounts,triIndices;check(fn.getVertices(counts,indices));check(fn.getTriangles(triCounts,triIndices));
+            mark();
             std::vector<uint32_t> provenance(counts.length());
-            if(divisions) {
+            if(divisions&&!uniform) {
                 MIntArray uvCounts,uvIds;MFloatArray u,v;check(fn.getAssignedUVs(uvCounts,uvIds,&uvSet));check(fn.getUVs(u,v,&uvSet));
                 if(uvCounts.length()!=counts.length())throw std::runtime_error("Subdivision provenance face count differs");
                 unsigned cursor=0;
@@ -133,16 +159,29 @@ public:
                     for(int c=0;c<counts[f];++c){double value=u[uvIds[cursor++]];if(!std::isfinite(value)||std::nearbyint(value)!=original||std::abs(value-original)>tolerance)throw std::runtime_error("Mixed subdivision source face");}
                     provenance[f]=uint32_t(original);
                 }
-            } else for(unsigned f=0;f<counts.length();++f)provenance[f]=f;
+            } else for(unsigned f=0;f<counts.length();++f)provenance[f]=divisions?0:f;
+            mark();
             std::vector<uint32_t> triangleFaces;triangleFaces.reserve(triIndices.length()/3);
             for(unsigned f=0;f<triCounts.length();++f)for(int t=0;t<triCounts[f];++t)triangleFaces.push_back(f);
             std::vector<uint32_t> hard;for(int e=0;e<fn.numEdges();++e)if(!fn.isEdgeSmooth(e,&status)){check(status);int2 pair;check(fn.getEdgeVertices(e,pair));hard.push_back(pair[0]);hard.push_back(pair[1]);}
-            std::ofstream out(std::filesystem::u8path(filename.asUTF8()),std::ios::binary|std::ios::trunc);
-            if(!out)throw std::runtime_error("Cannot open mesh output");
-            const char magic[8]={'R','T','M','E','S','H','0','1'};out.write(magic,8);
+            mark();
+            const char magic[8]={'R','T','M','E','S','H','0','1'};
             std::vector<uint64_t> header={points.length(),counts.length(),indices.length(),triIndices.length()/3,hard.size()/2,baseFaces,baseVertices,baseEdges,uint64_t(divisions)};
-            write(out,header);write(out,xyz);write(out,ints(counts));write(out,ints(indices));write(out,ints(triIndices));write(out,triangleFaces);write(out,provenance);write(out,hard);
-            out.close();if(!out)throw std::runtime_error("Mesh output write failed");setResult(filename);return MS::kSuccess;
+            if(memory){
+                exportBuffer.resize(80+xyz.size()*8+(counts.length()+indices.length()+triIndices.length()+triangleFaces.size()+provenance.size()+hard.size())*4);
+                size_t cursor=0;auto append=[&](const void* ptr,size_t bytes){if(bytes)std::memcpy(exportBuffer.data()+cursor,ptr,bytes);cursor+=bytes;};
+                append(magic,8);append(header.data(),72);append(xyz.data(),xyz.size()*8);
+                for(const MIntArray* array:{&counts,&indices,&triIndices}){auto converted=ints(*array);append(converted.data(),converted.size()*4);}
+                for(const auto* array:{&triangleFaces,&provenance,&hard})append(array->data(),array->size()*4);
+                mark();std::ostringstream result;result.precision(17);result<<"["<<reinterpret_cast<uintptr_t>(exportBuffer.data())<<","<<exportBuffer.size()<<",[";
+                for(unsigned i=0;i<timings.length();++i){if(i)result<<",";result<<timings[i];}result<<"]]";setResult(MString(result.str().c_str()));
+            }else{
+                std::ofstream out(std::filesystem::u8path(filename.asUTF8()),std::ios::binary|std::ios::trunc);
+                if(!out)throw std::runtime_error("Cannot open mesh output");out.write(magic,8);
+                write(out,header);write(out,xyz);write(out,ints(counts));write(out,ints(indices));write(out,ints(triIndices));write(out,triangleFaces);write(out,provenance);write(out,hard);
+                out.close();if(!out)throw std::runtime_error("Mesh output write failed");mark();if(profile)setResult(timings);else setResult(filename);
+            }
+            return MS::kSuccess;
         } catch(const std::exception& e){MGlobal::displayError(MString("RevToon native mesh export: ")+e.what());return MS::kFailure;}
     }
 };

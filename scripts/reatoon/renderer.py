@@ -28,7 +28,11 @@ DEFAULTS = dict(width=640, height=480, supersample=2, background=[1, 1, 1],
                 selected_edges=True, wireframe=False, hard_edges=True,
                 intersections=True, self_intersections=False, intersection_tolerance=1e-7,
                 depth_bias=0.002, distance_reduction=0.0, width_variation=0.0,
-                taper=0.0, dash_length=0.0, seed=1, line_sets={},edge_prepare_workers=4)
+                taper=0.0, dash_length=0.0, dash_gap=-1.0, relative_line_size=False,
+                connect_collinear_dashes=False,
+                line_opacity=1.0,
+                brush_size_scale=1.0,
+                seed=1, line_sets={},edge_prepare_workers=4)
 
 
 def _unit(v, fallback=None):
@@ -293,6 +297,20 @@ def prepare_edges(mesh):
         flat = np.asarray(faces,dtype=np.int64).reshape(-1)
     except ValueError:  # mixed polygon sizes
         flat = np.concatenate(faces).astype(np.int64)
+    if len(flat) and (flat.min()<0 or flat.max()>=len(vertices)):raise ValueError('Invalid polygon vertex index')
+    if len(vertices)<2**32:
+        from .native_cpu import edges
+        result=edges(vertices,flat,counts,mesh.get('material_ids',[0]*len(faces)))
+        if result is not None:
+            pairs=result['pairs'];codes=(pairs[:,0].astype(np.uint64)<<np.uint64(32))|pairs[:,1].astype(np.uint64)
+            for name,key in (('hard_edges','hard'),('selected_edges','selected')):
+                entries=mesh.get(name,[])
+                if len(entries):
+                    rows=np.sort(np.asarray(entries,np.int64).reshape(-1,2),axis=1)
+                    wanted=(rows[:,0].astype(np.uint64)<<np.uint64(32))|rows[:,1].astype(np.uint64)
+                    result[key]=np.isin(codes,wanted)
+                else:result[key]=np.zeros(len(pairs),bool)
+            return result
     following = np.arange(len(flat)) + 1
     following[np.cumsum(counts)-1] = starts
     points, next_points = vertices[flat], vertices[flat[following]]
@@ -330,14 +348,27 @@ def prepare_edges(mesh):
                 material=material, hard=marked('hard_edges'),selected=marked('selected_edges'))
 
 
+def _render_edges(mesh):
+    cache=mesh.get('_render_geometry')
+    if cache is None:return prepare_edges(mesh)
+    # Material assignment and selected-edge targeting remain live, independently
+    # of cached evaluated geometry and without relying on shader dirty events.
+    key=(np.asarray(mesh.get('material_ids',[]),np.int64).tobytes(),
+         np.asarray(mesh.get('selected_edges',[]),np.int64).tobytes())
+    saved=cache.get('_edges')
+    if saved is None or saved[0]!=key:
+        saved=(key,prepare_edges(mesh));cache['_edges']=saved
+    return saved[1]
+
+
 def prepare_mesh_edges(meshes, workers=1):
     """Prepare independent NumPy mesh topology with deterministic input order."""
     workers=max(1,min(int(workers),8,len(meshes)))
     if workers==1:
-        return [prepare_edges(mesh) for mesh in meshes]
+        return [_render_edges(mesh) for mesh in meshes]
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        return list(pool.map(prepare_edges,meshes))
+        return list(pool.map(_render_edges,meshes))
 
 
 def classify_edge_indices(prepared, camera, settings):
@@ -388,9 +419,24 @@ def line_style_passes(scene, settings=None):
     cfg.update(settings or {})
     table = dict(scene.get("line_sets", {}))
     table.update(cfg.get("line_sets", {}))
+    def resolve(overrides):
+        style = dict(cfg, **overrides)
+        scale=float(style.get('brush_size_scale',1.))
+        if not math.isfinite(scale) or not 0<=scale<=1:
+            raise ValueError('Brush width multiplier must be finite and in 0..1')
+        if scale!=1.:style['line_width']*=scale
+        if style.get('relative_line_size', False):
+            # Original 4.2.3 rectangle probes: width/640, independent of
+            # image height and supersampling. Keep persisted base values intact.
+            scale = float(cfg['width']) / 640.
+            for key in ('line_width', 'dash_length'):
+                style[key] *= scale
+            if style.get('dash_gap', -1.) >= 0:
+                style['dash_gap'] *= scale
+        return style
     meshes = scene.get("meshes", [])
     if not any("line_passes" in mesh for mesh in meshes):
-        styles = [dict(cfg, **table.get(mesh.get("line_set", ""), {})) for mesh in meshes]
+        styles = [resolve(table.get(mesh.get("line_set", ""), {})) for mesh in meshes]
         return [dict(line=None, priority=0, styles=styles,
                      face_style_ids=[np.full(len(m.get("faces", m.get("triangles", []))), i, dtype=np.int32)
                                      for i, m in enumerate(meshes)])]
@@ -410,20 +456,22 @@ def line_style_passes(scene, settings=None):
                 raise ValueError("line_passes face_line_sets must match polygon faces")
             assignments.append(values)
             selected_edges.append(item.get("selected_edges", {}) if item else {})
-        keys = sorted({key for values in assignments for key in values if key is not None}
+        unique_assignments=[set(values) for values in assignments]
+        keys = sorted({key for values in unique_assignments for key in values if key is not None}
                       | {key for values in selected_edges for key, pairs in values.items() if pairs},
                       key=lambda key: (table.get(key, {}).get("_order", 0), key))
         indices = {key: i for i, key in enumerate(keys)}
         result.append(dict(line=line, priority=priority,
-                           styles=[dict(cfg, **table.get(key, {})) for key in keys],
+                           styles=[resolve(table.get(key, {})) for key in keys],
                            selected_edges=[{indices[key]: pairs for key, pairs in values.items() if key in indices}
                                            for values in selected_edges],
-                           face_style_ids=[np.asarray([indices.get(key, -1) for key in values], dtype=np.int32)
-                                           for values in assignments]))
+                           face_style_ids=[np.full(len(values),indices.get(next(iter(unique)),-1),np.int32) if len(unique)==1 else
+                                           np.asarray([indices.get(key,-1) for key in values],dtype=np.int32)
+                                           for values,unique in zip(assignments,unique_assignments)]))
     return result
 
 
-def world_line_segments(scene, settings=None, intersections=None, prepared_edges=None, intersection_masks=None, style_passes=None, packed=False,prepared_intersections=None):
+def world_line_segments(scene, settings=None, intersections=None, prepared_edges=None, intersection_masks=None, style_passes=None, packed=False,prepared_intersections=None,prepared_outlines=None):
     """Return camera-selected world-space segments for rendering or VP2.
 
     Result contains ``segments``, ``warnings`` and ``intersection_diagnostics``.
@@ -443,8 +491,8 @@ def world_line_segments(scene, settings=None, intersections=None, prepared_edges
     prepared_edges = (prepared_edges if prepared_edges is not None else
                       prepare_mesh_edges(meshes,cfg.get('edge_prepare_workers',1)))
     all_styles = [style for item in passes for style in item['styles']]
-    triangle_outlines=None
-    if cfg.get('triangle_outlines',False) and any(style.get('outline') for style in all_styles):
+    triangle_outlines=prepared_outlines
+    if triangle_outlines is None and cfg.get('triangle_outlines',False) and any(style.get('outline') for style in all_styles):
         from .cpu_outline import outline_edges
         from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=max(1,min(4,len(meshes)))) as pool:
@@ -454,7 +502,7 @@ def world_line_segments(scene, settings=None, intersections=None, prepared_edges
             intersections = find_render_intersections(meshes, self_intersections=any(local.get("self_intersections") for local in all_styles),
                                                tolerance=cfg.get("intersection_tolerance", 1e-7), diagnostics=diagnostic,
                                                merge_segments=not any("line_passes" in m for m in meshes),triangle_masks=intersection_masks,
-                                               prepared_output=prepared_intersections)
+                                               prepared_output=prepared_intersections,array_output=packed)
         warnings.append("Intersection lines use supplied triangles; coplanar overlaps and point-only contacts are omitted. Self mode excludes shared vertices and same-polygon pairs.")
     else:
         intersections = []
@@ -462,9 +510,13 @@ def world_line_segments(scene, settings=None, intersections=None, prepared_edges
         styles, face_ids = item["styles"], item["face_style_ids"]
         for index, mesh in enumerate(meshes):
             prepared = prepared_edges[index]
-            owners = face_ids[index][prepared["owners"]]
             sentinel = len(styles)
-            edge_styles = np.minimum.reduceat(np.where(owners < 0, sentinel, owners), prepared["starts"])
+            ids=face_ids[index]
+            if len(ids) and ids.min()==ids.max():
+                edge_styles=np.full(len(prepared['pairs']),int(ids[0]) if ids[0]>=0 else sentinel,np.int32)
+            else:
+                owners = ids[prepared["owners"]]
+                edge_styles = np.minimum.reduceat(np.where(owners < 0, sentinel, owners), prepared["starts"])
             if "selected_edges" in item and any(len(pairs) for pairs in item['selected_edges'][index].values()):
                 pair_indices = {tuple(pair): edge for edge, pair in enumerate(prepared["pairs"])}
                 for style_id, pairs in item["selected_edges"][index].items():
@@ -504,6 +556,8 @@ def world_line_segments(scene, settings=None, intersections=None, prepared_edges
                         segments.append(dict(a=list(mesh['vertices'][pair[0]]), b=list(mesh['vertices'][pair[1]]),
                                              features=features, mesh_index=index, mesh=mesh.get('name', 'mesh'),
                                              settings=local, line=item['line']))
+                        if local.get('connect_collinear_dashes',False):
+                            segments[-1]['_vertex_ids']=tuple(int(v) for v in pair)
                 if triangle_outlines is not None and local.get('outline'):
                     chosen=np.flatnonzero(diagonal_styles==style_id)
                     if packed:
@@ -513,6 +567,32 @@ def world_line_segments(scene, settings=None, intersections=None, prepared_edges
                         for pair in diagonal_pairs[chosen]:
                             segments.append(dict(a=list(mesh['vertices'][pair[0]]),b=list(mesh['vertices'][pair[1]]),
                                 features=['outline'],mesh_index=index,mesh=mesh.get('name','mesh'),settings=local,line=item['line']))
+                            if local.get('connect_collinear_dashes',False):
+                                segments[-1]['_vertex_ids']=tuple(int(v) for v in pair)
+        if packed and hasattr(intersections,'batches'):
+            sentinel=len(styles)
+            for first,second,rows in intersections.batches:
+                feature='self_intersections' if first==second else 'intersections'
+                allowed=np.asarray([bool(st.get(feature)) for st in styles]+[False])
+                ids=[]
+                for col,index in ((6,first),(7,second)):
+                    triangles=rows[:,col].astype(np.int64)
+                    face_map=meshes[index].get('triangle_faces')
+                    if face_map is None and meshes[index].get('triangles') is None:
+                        face_map=np.repeat(np.arange(len(meshes[index]['faces'])),[len(f)-2 for f in meshes[index]['faces']])
+                    faces=np.asarray(face_map)[triangles] if face_map is not None else triangles
+                    sid=face_ids[index][faces]
+                    sid=np.where(sid<0,sentinel,sid)
+                    ids.append(np.where(allowed[sid],sid,sentinel))
+                chosen=np.minimum(ids[0],ids[1])
+                owners=np.where(ids[0]<=ids[1],first,second)
+                # Preserve original record/painter order, including alternating
+                # materials at adjacent triangles. Group only consecutive runs.
+                cuts=np.r_[0,np.flatnonzero((chosen[1:]!=chosen[:-1])|(owners[1:]!=owners[:-1]))+1,len(rows)]
+                for lo,hi in zip(cuts[:-1],cuts[1:]):
+                    sid=int(chosen[lo]);index=int(owners[lo])
+                    if sid<sentinel:segments.add_intersections(meshes[index],index,rows[lo:hi],styles[sid],item['line'])
+            continue
         for intersection in intersections:
             first, second = intersection["mesh_indices"]
             enabled = []
@@ -595,6 +675,15 @@ def _down(image, scale):
     if scale == 1:
         return image
     h, w, c = image.shape
+    if image.dtype==np.float32 and image.size>=65536:
+        try:
+            from .native_cpu import library,down_float32
+            if library() is None:
+                from .accelerator import enable
+                enable()
+                from ._image_kernel import down_float32
+            return down_float32(image,scale)
+        except ImportError:pass
     return image.reshape(h // scale, scale, w // scale, scale, c).mean(axis=(1, 3))
 
 
@@ -616,7 +705,7 @@ def _white_matte_rgba(layer):
     return result
 
 
-def render(scene, output_prefix, settings=None):
+def render(scene, output_prefix, settings=None, depth_prepass=None):
     """Render scene to six image/vector passes and a JSON manifest.
 
     Edges and triangles are clipped against near/far planes. Perspective depth
@@ -627,20 +716,38 @@ def render(scene, output_prefix, settings=None):
     cfg = dict(DEFAULTS)
     cfg.update(settings or {})
     line_only=bool(cfg.get('line_only',False))
+    styles=line_style_passes(scene,cfg)
+    all_styles=[s for item in styles for s in item['styles']]
+    opacities=[float(s.get('line_opacity',1.)) for s in all_styles]
+    if any(not math.isfinite(v) or not 0<=v<=1 for v in opacities):
+        raise ValueError('Brush opacity must be finite and in 0..1')
+    frame_opacity=1.
+    if any(v!=1. for v in opacities):
+        if len(all_styles)!=1 or all_styles[0].get('hidden_lines',False):
+            raise ValueError('Brush opacity currently requires one visible-only line style; multiple/hidden brushes are not implemented')
+        frame_opacity=opacities[0]
     width, height, ss = int(cfg["width"]), int(cfg["height"]), int(cfg["supersample"])
     if not (1 <= width <= 4096 and 1 <= height <= 4096 and ss in (1, 2, 3, 4)):
         raise ValueError("Resolution must be 1..4096 and supersample 1..4")
-    if width * height * ss * ss > 16_777_216:
-        raise ValueError("Supersampled frame exceeds 16 megapixels; reduce resolution or supersample")
+    from .render_limits import check_frame_samples
+    check_frame_samples(width,height,ss)
     w, h = width * ss, height * ss
     camera = _camera(scene.get("camera", {}), w, h)
-    depth = np.full((h, w), np.inf, dtype=np.float64)
-    depth_planes = np.zeros((h, w, 3), dtype=np.float64)
-    mesh_owners = np.full((h, w), -1, dtype=np.int32) if scene.get("merge_groups") else None
-    beauty = np.empty((h, w, 3), dtype=np.float32)
-    beauty[:] = _color(cfg["background"])
+    if depth_prepass is not None:
+        if not line_only or not cfg.get('compiled_depth',True):raise ValueError('Depth prepass requires compiled line-only rendering')
+        if depth_prepass['meshes']!=[id(m) for m in scene.get('meshes',[])]:raise ValueError('Depth prepass meshes differ')
+        expected=depth_prepass['camera']
+        if any(not np.array_equal(camera[key],expected[key]) for key in camera):raise ValueError('Depth prepass camera differs')
+    depth = np.full((h, w), np.inf, dtype=np.float64) if depth_prepass is None else depth_prepass['depth']
+    depth_planes = np.zeros((h, w, 3), dtype=np.float64) if depth_prepass is None else depth_prepass['planes']
+    mesh_owners=None
+    if scene.get('merge_groups'):
+        mesh_owners=depth_prepass['owners'] if depth_prepass is not None else np.full((h,w),-1,np.int32)
+        if mesh_owners is None:raise ValueError('Depth prepass is missing merge group owners')
+    beauty = None if line_only else np.empty((h, w, 3), dtype=np.float32)
+    if beauty is not None:beauty[:] = _color(cfg["background"])
     visible = np.zeros((h, w, 4), dtype=np.float32)
-    hidden = np.zeros_like(visible)
+    hidden = None
     meshes = scene.get("meshes", [])
     stats = dict(meshes=len(meshes), triangles=0, classified_edges=0, visible_segments=0, hidden_segments=0,
                  width=width, height=height, supersample=ss)
@@ -652,7 +759,7 @@ def render(scene, output_prefix, settings=None):
         try:
             from .cpu_stroke import get_stroke
             stroke_fn=get_stroke()
-            stats['stroke_backend']='numba-cpu-stroke'
+            stats['stroke_backend']='native-cpu-stroke' if stroke_fn.__module__.endswith('native_cpu') else 'numba-cpu-stroke'
         except RuntimeError as error:
             if 'accelerator unavailable' not in str(error):raise
             warnings.append(str(error)+'; using Python CPU stroke reference')
@@ -674,6 +781,7 @@ def render(scene, output_prefix, settings=None):
     for group in scene.get("merge_groups", []):
         mesh_groups[group["mesh_indices"]] = int(group["id"])
     group_image = None
+    if any(s.get('hidden_lines',False) for s in all_styles):hidden=np.zeros_like(visible)
     for mesh_index, mesh in enumerate(meshes):
         verts = np.asarray(mesh["vertices"], dtype=float)
         if verts.ndim != 2 or verts.shape[1] != 3 or not np.isfinite(verts).all():
@@ -704,13 +812,19 @@ def render(scene, output_prefix, settings=None):
         mats = mesh.get("materials") or [{}]
         if any(material.get("ramp") for material in mats):
             warnings.append("Imported color ramps use RevToon's diffuse lighting and reference interpolation; exact original light/shadow response is not reproduced.")
-        mids = mesh.get("material_ids", [0] * len(faces))
-        if len(mids) != len(faces) or any(i < 0 or i >= len(mats) for i in mids):
+        mids = np.asarray(mesh.get("material_ids", [0] * len(faces)))
+        if len(mids) != len(faces) or (len(mids) and (np.min(mids)<0 or np.max(mids)>=len(mats))):
             raise ValueError("material_ids must select one valid material for each face")
         normals = [] if line_only else [_face_normal(verts, face) for face in faces]
         colors = [] if line_only else [cel_color(n, mats[mid], scene.get("light", {})) for n, mid in zip(normals, mids)]
         if any(float(m.get("opacity", 1)) != 1 for m in mats):
             warnings.append("Transparent material rendered opaque: %s" % mesh.get("name", "mesh"))
+        if depth_prepass is not None:
+            face_indices=np.asarray(tri_faces,dtype=np.int64)
+            if len(face_indices) and (face_indices.min()<0 or face_indices.max()>=len(faces)):raise ValueError('Invalid triangle_faces entry')
+            stats['triangles']+=depth_prepass['counts'][mesh_index]
+            stats['depth_backend']=depth_prepass['backend']
+            continue
         camverts = (verts - camera["eye"]) @ camera["basis"].T
         if line_only and cfg.get('compiled_depth',True):
             from .cpu_depth import rasterize_mesh
@@ -726,6 +840,7 @@ def render(scene, output_prefix, settings=None):
                 if 'accelerator unavailable' not in str(error):raise
                 warnings.append(str(error)+'; using Python CPU depth reference')
                 stats['depth_backend']='python-cpu-reference'
+        if beauty is None:beauty=np.empty((h,w,3),np.float32)
         triangle_normals = None if line_only else mesh.get("triangle_normals")
         if triangle_normals is not None and len(triangle_normals) != len(tris):
             raise ValueError("triangle_normals must contain three normals for every triangle")
@@ -751,8 +866,6 @@ def render(scene, output_prefix, settings=None):
     if mesh_owners is not None:
         group_image = np.where(mesh_owners >= 0, mesh_groups[np.maximum(0, mesh_owners)], -1)
     vectors = []
-    styles=line_style_passes(scene,cfg)
-    all_styles=[s for item in styles for s in item['styles']]
     masks=None;cull_stats=None
     if (line_only and cfg.get('visibility_cull',True) and not elements and
         not any(s.get('hidden_lines',False) for s in all_styles) and
@@ -761,7 +874,7 @@ def render(scene, output_prefix, settings=None):
             from .cpu_triangle_visibility import visibility_masks
             max_width=max((max(0.,float(s['line_width']))*(1+np.clip(float(s.get('width_variation',0)),0,.95))*ss for s in all_styles),default=0.)
             bias=max((float(s['depth_bias']) for s in all_styles),default=0.)
-            masks,cull_stats=visibility_masks(meshes,camera,depth,depth_planes,bias,max_width/2+1,float(cfg.get('intersection_tolerance',1e-7)))
+            masks,cull_stats=visibility_masks(meshes,camera,depth,depth_planes,bias,max_width/2+1,float(cfg.get('intersection_tolerance',1e-7)),camera_vertices=[m['_render_camera_vertices'] for m in meshes] if depth_prepass is not None else None)
             cull_stats['production_enabled']=True
         except ImportError as error:
             warnings.append('Triangle visibility accelerator unavailable: %s; using full intersection query' % error)
@@ -772,7 +885,7 @@ def render(scene, output_prefix, settings=None):
     prepared_intersections=[] if refined else None
     line_data = world_line_segments(scene, cfg,intersection_masks=masks,style_passes=styles,
                                    packed=line_only and cfg.get('compiled_segments',True),
-                                   prepared_intersections=prepared_intersections)
+                                   prepared_intersections=prepared_intersections,prepared_outlines=depth_prepass["outlines"] if depth_prepass is not None else None)
     visibility=None
     if refined:
         try:
@@ -805,6 +918,11 @@ def render(scene, output_prefix, settings=None):
             stats['segment_backend']=batch['backend']
             if visibility is not None:stats['visibility_refinement']=batch['visibility_refinement']
             remaining_segments=[]
+    if any(s.get('connect_collinear_dashes',False) and s.get('dash_length',0)>0 for s in all_styles):
+        from .stroke_graph import connect_collinear
+        count=len(remaining_segments)
+        remaining_segments=connect_collinear(remaining_segments)
+        stats['collinear_connections']=count-len(remaining_segments)
     for edge_index, segment in enumerate(remaining_segments):
         mesh_index = segment["mesh_index"]
         local, kinds = segment["settings"], segment["features"]
@@ -867,8 +985,15 @@ def render(scene, output_prefix, settings=None):
             if not is_visible and not local["hidden_lines"]:
                 continue
             dash = float(local.get("dash_length", 0)) * ss
-            if dash > 0 and int(mid[k] * length / dash) % 2:
-                continue
+            if dash > 0:
+                gap = float(local.get('dash_gap', -1.0))
+                # Preserve the previous alternating-length behavior exactly
+                # for saved scenes which do not specify an independent gap.
+                if gap < 0:
+                    if int(mid[k] * length / dash) % 2:
+                        continue
+                elif gap > 0 and (mid[k] * length) % (dash + gap * ss) >= dash:
+                    continue
             line_width = max(0., float(local["line_width"]))
             reduction = max(0., float(local.get("distance_reduction", 0)))
             line_width /= 1 + reduction * z[k]
@@ -900,7 +1025,7 @@ def render(scene, output_prefix, settings=None):
         # colored edges therefore agree with SVG/EPS painter ordering.
         if not local.get("output_to_elements_only", False):
             _over(visible[low[1]:high[1], low[0]:high[0]], edge_visible)
-            _over(hidden[low[1]:high[1], low[0]:high[0]], edge_hidden)
+            if hidden is not None:_over(hidden[low[1]:high[1], low[0]:high[0]], edge_hidden)
         for _, layer, scratch in element_strokes:
             for visibility in (0, 1):
                 _over(layer[visibility, low[1]:high[1], low[0]:high[0]], scratch[visibility])
@@ -910,12 +1035,18 @@ def render(scene, output_prefix, settings=None):
             if not local.get("output_to_elements_only", False):
                 stats["visible_segments" if vis else "hidden_segments"] += 1
     strokes_finished=time.perf_counter()
+    # Normal brush amount applies once to the completed brush coverage.
+    # Applying it to every capsule/edge would darken joins and crossings.
+    if frame_opacity!=1.:
+        visible*=frame_opacity
     if line_only:
-        beauty=hidden.copy()
-        _over(beauty,visible)
+        if not any(s.get('hidden_lines',False) for s in all_styles):beauty=visible
+        else:
+            beauty=hidden.copy()
+            _over(beauty,visible)
     else:
         # Hidden strokes are intentionally an x-ray overlay on the fill.
-        beauty = hidden[..., :3] + beauty * (1 - hidden[..., 3, None])
+        if hidden is not None:beauty = hidden[..., :3] + beauty * (1 - hidden[..., 3, None])
         beauty = visible[..., :3] + beauty * (1 - visible[..., 3, None])
     auxiliary=cfg.get('auxiliary_outputs',True)
     prefix = Path(output_prefix).expanduser().resolve()
@@ -923,14 +1054,18 @@ def render(scene, output_prefix, settings=None):
     paths = {k: str(prefix.parent / (prefix.name + "_" + k + ext)) for k, ext in
              (("beauty", ".png"), ("visible", ".png"), ("hidden", ".png"), ("depth", ".png"),
               ("lines", ".svg"), ("eps", ".eps"), ("manifest", ".json")) if auxiliary or k in ('beauty','manifest')}
+    if frame_opacity!=1. and 'eps' in paths:
+        del paths['eps']
+        warnings.append('EPS output skipped: translucent brush output requires an alpha-capable format; use PNG or SVG')
     _png(Path(paths["beauty"]), _white_matte_rgba(_down(beauty,ss)) if line_only else _down(beauty, ss))
     if auxiliary:
         depth_img = np.where(np.isfinite(depth), np.clip(1 - (depth - camera["near"]) / (camera["far"] - camera["near"]), 0, 1), 0)
         depth_img = np.repeat(depth_img[..., None], 3, axis=2)
         _png(Path(paths['visible']), _straight(_down(visible, ss)))
-        _png(Path(paths['hidden']), _straight(_down(hidden, ss)))
+        _png(Path(paths['hidden']), _straight(_down(hidden, ss)) if hidden is not None else np.zeros((height,width,4),np.float32))
         _png(Path(paths['depth']), _down(depth_img, ss))
     svg = ['<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" viewBox="0 0 %d %d">' % (width, height, width, height)]
+    if frame_opacity!=1.:svg.append('<g opacity="%.9g">'%frame_opacity)
     eps = ["%!PS-Adobe-3.0 EPSF-3.0", "%%%%BoundingBox: 0 0 %d %d" % (width, height), "1 setlinecap 1 setlinejoin"]
     # Raster composites the hidden pass before the visible pass; mirror that
     # ordering so a hidden stroke cannot obscure a visible one in vector tools.
@@ -944,21 +1079,28 @@ def render(scene, output_prefix, settings=None):
                     " ".join(vector["features"]), escape(vector["mesh"])))
         eps.append("%.6f %.6f %.6f setrgbcolor %.4f setlinewidth newpath %.4f %.4f moveto %.4f %.4f lineto stroke" %
                    (*color, vector["width"], a[0], height - a[1], b[0], height - b[1]))
+    if frame_opacity!=1.:svg.append('</g>')
     svg.append("</svg>")
     eps.extend(["showpage", "%%EOF"])
     if auxiliary:
         Path(paths['lines']).write_text('\n'.join(svg), encoding='utf-8')
-        Path(paths['eps']).write_text('\n'.join(eps), encoding='ascii')
+        if 'eps' in paths:Path(paths['eps']).write_text('\n'.join(eps), encoding='ascii')
     for element, layer in elements:
         path = render_elements.output_path(element, prefix, scene.get("scene_name", ""))
         if layer is not None:
             _over(layer[0], layer[1])
             layer = layer[0]
+            if frame_opacity!=1.:layer*=frame_opacity
             if element["bg_color_enable"]:
                 layer[..., :3] += np.asarray(element["bg_color"]) * (1 - layer[..., 3, None])
                 layer[..., 3] = 1
             _png(path, _straight(_down(layer, ss)))
         else:
+            if frame_opacity!=1.:
+                element_results.append(dict(name=element['name'],status='unsupported',kind=element['kind'],
+                    reason='EPS cannot preserve translucent brush output; use PNG or SVG'))
+                warnings.append(element['name']+': EPS skipped because brush opacity is below one')
+                continue
             lines = ["%!PS-Adobe-3.0 EPSF-3.0", "%%%%BoundingBox: 0 0 %d %d" % (width, height), "1 setlinecap 1 setlinejoin"]
             for vector in sorted(vectors, key=lambda item: item["visible"]):
                 if not render_elements.accepts(element, vector["visible"], vector["features"], vector["settings"]):
@@ -972,6 +1114,7 @@ def render(scene, output_prefix, settings=None):
                 warnings.append(element["name"] + ": standards-compliant EPS written; Illustrator-specific editable metadata is not implemented.")
         element_results.append(dict(name=element["name"], status="written", kind=element["kind"], path=str(path)))
     stats['output_mode']='lines_rgba' if line_only else 'shaded_rgb'
+    if frame_opacity!=1.:stats['brush_opacity']=frame_opacity
     if line_only:stats['rgb_encoding']='white_matte_with_coverage_alpha'
     stats['timings_seconds']=dict(depth=depth_finished-started,line_geometry=geometry_finished-depth_finished,
         strokes=strokes_finished-geometry_finished,output=time.perf_counter()-strokes_finished,total=time.perf_counter()-started)

@@ -195,7 +195,9 @@ def remap_passes(mesh, passes):
         selected = {}
         for style, pairs in item.get("selected_edges", {}).items():
             selected[style] = [child for pair in pairs for child in edges.get("%d,%d" % tuple(sorted(pair)), [])]
-        result.append(dict(item, face_line_sets=[item["face_line_sets"][source] for source in mapping], selected_edges=selected))
+        values=item["face_line_sets"]
+        expanded=([values[0]]*len(mapping) if values and len(set(values))==1 else [values[source] for source in mapping])
+        result.append(dict(item,face_line_sets=expanded,selected_edges=selected))
     return result
 
 

@@ -322,7 +322,8 @@ def _set_changed(ctx):
     cmds.setParent(tabs)
     detail = cmds.columnLayout(adjustableColumn=True)
     for key, label in [('distance_reduction','Distance reduction'),('width_variation','Width variation'),
-                       ('taper','Taper'),('dash_length','Dash length')]:
+                       ('taper','Taper'),('dash_length','Dash length'),('dash_gap','Dash gap (-1 = length)'),
+                       ('connect_collinear_dashes','Connect collinear dashes (CPU)')]:
         _field(node, key, label, values)
     cmds.text(label=tr('Taper and variation are supported by offline rendering.\nVP2 shows constant width per edge.'), align='left')
     cmds.setParent(tabs)
@@ -363,7 +364,10 @@ def _brush_fields(node, values):
     frame = cmds.frameLayout(label=tr('Brush'), collapsable=True, collapse=False)
     cmds.columnLayout(adjustableColumn=True)
     _field(node,'line_color','Color',values)
+    _field(node,'line_opacity','Opacity (CPU; one visible brush)',values)
+    _field(node,'relative_line_size','Relative size (640 px width)',values)
     _field(node,'line_width','Size (pixels)',values)
+    _field(node,'brush_size_scale','Width multiplier (CPU)',values)
     cmds.setParent(frame)
     cmds.setParent('..')
 

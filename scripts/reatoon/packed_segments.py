@@ -29,7 +29,16 @@ class PackedSegments:
         points=prepared['vertices'][prepared['pairs'][indices]]
         self.parts.append(dict(points=points,flags=flags[indices],settings=style,
             mesh=mesh.get('name','mesh'),mesh_index=index,line=line,count=len(indices)))
+        if style.get('connect_collinear_dashes',False):
+            self.parts[-1]['vertex_ids']=prepared['pairs'][indices]
         self.count+=len(indices)
+
+    def add_intersections(self,mesh,index,rows,style,line):
+        self._flush()
+        if not len(rows):return
+        self.parts.append(dict(points=rows[:,:6].reshape(-1,2,3),flags=np.full(len(rows),128,np.uint8),
+            settings=style,mesh=mesh.get('name','mesh'),mesh_index=index,line=line,count=len(rows),intersection=True))
+        self.count+=len(rows);self.intersection_count+=len(rows)
 
     def styles(self):
         self._flush()
@@ -69,9 +78,11 @@ class PackedSegments:
     def _record(self,part,index):
         if 'records' in part:return part['records'][index]
         from .renderer import EDGE_FEATURES
-        return dict(a=part['points'][index,0].tolist(),b=part['points'][index,1].tolist(),
-            features=[name for bit,name in enumerate(EDGE_FEATURES) if int(part['flags'][index])&(1<<bit)],
+        result=dict(a=part['points'][index,0].tolist(),b=part['points'][index,1].tolist(),
+            features=['intersection'] if part.get('intersection') else [name for bit,name in enumerate(EDGE_FEATURES) if int(part['flags'][index])&(1<<bit)],
             mesh_index=part['mesh_index'],mesh=part['mesh'],settings=part['settings'],line=part['line'])
+        if 'vertex_ids' in part:result['_vertex_ids']=tuple(int(v) for v in part['vertex_ids'][index])
+        return result
 
     def __getitem__(self,index):
         part_index=bisect_right(self.ends,index)

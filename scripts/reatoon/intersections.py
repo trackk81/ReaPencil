@@ -12,10 +12,54 @@ from __future__ import annotations
 
 import time
 import os
+import hashlib
+import threading
+from collections import OrderedDict
 from collections import deque
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from .robust_predicates import strictly_separated, orient3d_value
+
+
+class IntersectionBatches:
+    """Ordered native rows; legacy callers can still iterate exact records."""
+    def __init__(self):self.batches=[];self.count=0
+    def add(self,i,j,rows):
+        if len(rows):self.batches.append((i,j,rows));self.count+=len(rows)
+    def __len__(self):return self.count
+    def __iter__(self):
+        for i,j,rows in self.batches:
+            for row in rows:
+                yield dict(a=row[:3],b=row[3:6],mesh_indices=[i,j],
+                           triangle_pairs=[[int(row[6]),int(row[7])]],features=['intersection'])
+
+
+_QUERY_CACHE=OrderedDict()
+_QUERY_LOCK=threading.Lock()
+_QUERY_BYTES=0
+_QUERY_LIMIT=128*1024*1024
+
+
+def clear_query_cache():
+    global _QUERY_BYTES
+    with _QUERY_LOCK:_QUERY_CACHE.clear();_QUERY_BYTES=0
+
+
+def _query_cached(key,compute):
+    global _QUERY_BYTES
+    if key is None:return compute()
+    with _QUERY_LOCK:
+        found=_QUERY_CACHE.get(key)
+        if found is not None:_QUERY_CACHE.move_to_end(key);return found
+    result=compute()
+    size=result[0].nbytes+result[1].nbytes+256
+    if result[2] or size>_QUERY_LIMIT:return result
+    with _QUERY_LOCK:
+        if key not in _QUERY_CACHE:
+            _QUERY_CACHE[key]=result;_QUERY_BYTES+=size
+        while _QUERY_BYTES>_QUERY_LIMIT:
+            _,old=_QUERY_CACHE.popitem(last=False);_QUERY_BYTES-=old[0].nbytes+old[1].nbytes+256
+    return result
 
 
 class IntersectionLimitError(RuntimeError):
@@ -178,6 +222,8 @@ def triangle_intersection(first, second, tolerance=1e-7):
 
 
 def _prepare(mesh, native_bvh=False):
+    cache=mesh.get('_render_geometry') if native_bvh else None
+    if cache is not None and '_bvh' in cache:return dict(cache['_bvh'])
     vertices = np.asarray(mesh.get("vertices", []), dtype=float)
     if vertices.size == 0:
         vertices = np.empty((0, 3))
@@ -199,26 +245,36 @@ def _prepare(mesh, native_bvh=False):
         raise ValueError("Triangle indices are invalid")
     if owners is not None and len(owners) != len(indices):
         raise ValueError("triangle_faces count must match triangles")
-    positions = vertices[indices]
-    lows = positions.min(axis=1) if len(indices) else np.empty((0, 3))
-    highs = positions.max(axis=1) if len(indices) else np.empty((0, 3))
-    cross = np.cross(positions[:, 1] - positions[:, 0], positions[:, 2] - positions[:, 0])
-    areas = np.linalg.norm(cross, axis=1)
-    normals = np.divide(cross, areas[:, None], out=np.zeros_like(cross), where=areas[:, None] > 0)
-    longest = np.max(np.stack([np.linalg.norm(positions[:, 1] - positions[:, 0], axis=1),
-                              np.linalg.norm(positions[:, 2] - positions[:, 0], axis=1),
-                              np.linalg.norm(positions[:, 2] - positions[:, 1], axis=1)]), axis=0)
+    from . import native_cpu
+    facts=native_cpu.facts(vertices,indices) if native_bvh else None
+    if facts is not None:positions,lows,highs,normals,areas,longest=facts
+    else:
+        positions = vertices[indices]
+        lows = positions.min(axis=1) if len(indices) else np.empty((0, 3))
+        highs = positions.max(axis=1) if len(indices) else np.empty((0, 3))
+        cross = np.cross(positions[:, 1] - positions[:, 0], positions[:, 2] - positions[:, 0])
+        areas = np.linalg.norm(cross, axis=1)
+        normals = np.divide(cross, areas[:, None], out=np.zeros_like(cross), where=areas[:, None] > 0)
+        longest = np.max(np.stack([np.linalg.norm(positions[:, 1] - positions[:, 0], axis=1),
+                                  np.linalg.norm(positions[:, 2] - positions[:, 0], axis=1),
+                                  np.linalg.norm(positions[:, 2] - positions[:, 1], axis=1)]), axis=0)
     flat=None
     if len(indices) and native_bvh:
         from types import SimpleNamespace
-        from ._bvh_kernel import build
-        flat=build(lows,highs)
+        flat=native_cpu.bvh(lows,highs)
+        if flat is None:
+            from ._bvh_kernel import build
+            flat=build(lows,highs)
         root=SimpleNamespace(low=flat[0][0],high=flat[1][0])
     else:
         root=_Node(lows,highs,np.arange(len(indices)),leaf_size=16) if len(indices) else None
-    return dict(vertices=vertices, indices=indices, positions=positions, lows=lows, highs=highs,
+    result=dict(vertices=vertices, indices=indices, positions=positions, lows=lows, highs=highs,
                 owners=owners, normals=normals, areas=areas, longest=longest,
                 root=root,flat=flat)
+    if cache is not None:
+        result['cache_token']=object()
+        cache['_bvh']=result
+    return dict(result)
 
 
 def _flat_bvh(root):
@@ -244,6 +300,9 @@ def _flat_bvh(root):
 def _native_function(backend):
     if backend == "python":
         return None, None
+    if backend=='auto':
+        from .native_cpu import library,query
+        if library() is not None:return query,None
     try:
         from .accelerator import enable
         enable()
@@ -297,21 +356,26 @@ def _merge_segments(records, eps):
     return output
 
 
-def _native_records(data,native,self_intersections,eps,max_candidates,max_segments,counts,workers):
+def _native_records(data,native,self_intersections,eps,max_candidates,max_segments,counts,workers,array_output=False):
     """Bounded native queries; ordered consumption preserves deterministic output."""
     pairs=[(i,j) for i,a in enumerate(data) if a['root'] is not None
            for j in range(i if self_intersections else i+1,len(data))
            if data[j]['root'] is not None and _overlap(a['root'].low,a['root'].high,
                data[j]['root'].low,data[j]['root'].high,eps)]
+    mask_keys=[hashlib.sha256(item['active_triangles'].tobytes()).digest() if 'active_triangles' in item else None for item in data]
     def query(pair):
         i,j=pair;a,b=data[i],data[j]
         arguments=(*a['flat'],*b['flat'],a['positions'],b['positions'],a['lows'],a['highs'],b['lows'],b['highs'],
             a['indices'],b['indices'],a['owner_array'],b['owner_array'],a['normals'],b['normals'],
             a['areas'],b['areas'],a['longest'],b['longest'],i==j,eps,max_candidates,max_segments)
-        if 'active_triangles' in a:
-            return native(*arguments,a['active_triangles'],b['active_triangles'],a['active_nodes'],b['active_nodes'])
-        return native(*arguments)
-    records=[]
+        def compute():
+            output=(native(*arguments,a['active_triangles'],b['active_triangles'],a['active_nodes'],b['active_nodes'])
+                    if 'active_triangles' in a else native(*arguments))
+            return np.asarray(output[0],np.float64).reshape(-1,8),output[1],output[2]
+        key=((a['cache_token'],b['cache_token'],i==j,eps,max_candidates,max_segments,mask_keys[i],mask_keys[j])
+             if 'cache_token' in a and 'cache_token' in b else None)
+        return _query_cached(key,compute)
+    records=IntersectionBatches() if array_output else []
     with ThreadPoolExecutor(max_workers=workers) as executor:
         source=iter(pairs)
         pending=deque()
@@ -330,14 +394,16 @@ def _native_records(data,native,self_intersections,eps,max_candidates,max_segmen
             if failure or counts['candidate_pairs']>max_candidates or len(records)+len(segments)>max_segments:
                 kind='candidate' if failure==1 or counts['candidate_pairs']>max_candidates else 'segment'
                 raise IntersectionLimitError('Intersection %s budget exceeded; no partial lines returned'%kind)
-            records.extend(dict(a=row[:3],b=row[3:6],mesh_indices=[i,j],triangle_pairs=[[int(row[6]),int(row[7])]])
-                           for row in np.asarray(segments,dtype=np.float64).tolist())
+            if array_output:records.add(i,j,segments)
+            else:
+                records.extend(dict(a=row[:3],b=row[3:6],mesh_indices=[i,j],triangle_pairs=[[int(row[6]),int(row[7])]])
+                               for row in segments.tolist())
     return records
 
 
 def find_intersections(meshes, self_intersections=False, tolerance=1e-7,
                        max_candidates=2_000_000, max_segments=200_000, diagnostics=None, backend="auto", merge_segments=True, workers=None,
-                       triangle_masks=None,prepared_output=None):
+                       triangle_masks=None,prepared_output=None,array_output=False):
     """Return merged world-space intersection records for scene mesh objects.
 
     Each record has ``a``, ``b`` XYZ lists, ``mesh_indices`` [i,j], contributing
@@ -379,7 +445,9 @@ def find_intersections(meshes, self_intersections=False, tolerance=1e-7,
             item['active_triangles']=np.ascontiguousarray(active)
             item['active_nodes']=None
             if native is not None and item['root'] is not None:
-                from ._intersection_kernel import active_bvh_nodes
+                from .native_cpu import library,active_bvh_nodes
+                if library() is None:
+                    from ._intersection_kernel import active_bvh_nodes
                 item['active_nodes']=active_bvh_nodes(item['flat'][2],item['flat'][3],item['flat'][4],active)
     if native is not None:
         for item in data:
@@ -390,7 +458,7 @@ def find_intersections(meshes, self_intersections=False, tolerance=1e-7,
                   candidate_pairs=0, narrow_pairs=0, adjacent_skipped=0, coplanar_pairs=0,
                   degenerate_pairs=0, point_contacts=0, raw_segments=0, segments=0,
                   tolerance=eps, broadphase="triangle AABB BVH", node_pairs=0,
-                  aabb_pairs=0, plane_rejected=0, backend="numba-nogil" if native is not None else "python",
+                  aabb_pairs=0, plane_rejected=0, backend=("native-cpu" if native is not None and native.__module__.endswith("native_cpu") else "numba-nogil" if native is not None else "python"),
                   fallback_reason=fallback_reason,workers=workers)
     if triangle_masks is not None:
         counts['triangle_masking']=dict(active=sum(int(np.count_nonzero(item['active_triangles'])) for item in data),
@@ -398,7 +466,7 @@ def find_intersections(meshes, self_intersections=False, tolerance=1e-7,
     records = []
     if native is not None:
         try:
-            records=_native_records(data,native,self_intersections,eps,max_candidates,max_segments,counts,workers)
+            records=_native_records(data,native,self_intersections,eps,max_candidates,max_segments,counts,workers,array_output and not merge_segments)
         except IntersectionLimitError:
             if diagnostics is not None:diagnostics.update(counts,incomplete=True,elapsed_seconds=time.perf_counter()-started)
             raise
@@ -470,6 +538,7 @@ def find_intersections(meshes, self_intersections=False, tolerance=1e-7,
     traversed_at = time.perf_counter()
     if merge_segments:
         result=_merge_segments(records,eps)
+    elif isinstance(records,IntersectionBatches):result=records
     else:
         # Records are owned by this query. Avoid duplicating hundreds of
         # thousands of dictionaries just to attach the common feature field.

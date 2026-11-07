@@ -6,6 +6,8 @@ function with the same arguments as renderer._stroke. No automatic fallback.
 
 
 def get_stroke():
+    from .native_cpu import library,stroke as native_stroke
+    if library() is not None:return native_stroke
     from .accelerator import enable
     enable()
     try:

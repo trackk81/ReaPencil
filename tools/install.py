@@ -32,6 +32,7 @@ def install(modules_dir=None, install_dir=None):
     files = [p for sub in ('scripts', 'plug-ins') for p in (ROOT / sub).rglob('*.py') if '__pycache__' not in p.parts]
     files += list((ROOT / 'rendererDesc').glob('*.xml'))
     files += list((ROOT / 'plug-ins').rglob('*.mll'))
+    files += list((ROOT / 'plug-ins').rglob('*.dll'))
     files += list((ROOT / 'scripts').glob('*.mel'))
     files += list((ROOT / 'scripts').rglob('*.ogsfx'))
     if not files or not (ROOT / 'plug-ins' / 'reaPencil.py').is_file():

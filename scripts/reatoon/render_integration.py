@@ -92,7 +92,7 @@ def _settings(width=None, height=None):
     settings['height'] = int(height if height and height > 0 else cmds.getAttr('defaultResolution.height'))
     aspect = float(_attribute('defaultResolution.pixelAspect', 1.0))
     if not math.isclose(aspect, 1., abs_tol=1e-6):
-        raise ValueError('ReaPencil currently requires square pixels (Pixel Aspect Ratio = 1).')
+        raise ValueError('ReaPencil requires square pixels, not a square image. Pixel Aspect Ratio is %.6g. In the ReaPencil Render Settings tab click "Use square pixels"; this keeps Width/Height and corrects the device aspect ratio.' % aspect)
     if int(_attribute('defaultRenderGlobals.imageFormat', 32)) != 32:
         cmds.warning('ReaPencil writes PNG image passes; the Maya image-format setting is not used.')
     return maya_scene.validate_settings(settings)
@@ -234,6 +234,40 @@ def command_render(options=''):
     return batch_render(options=options)
 
 
+def _use_square_pixels(*_):
+    """Keep the requested image dimensions and synchronize Maya's ratios.
+
+    Direct attrControlGrp edits do not run the Common tab's resolution-change
+    procedures. An old device ratio otherwise changes the computed pixel ratio.
+    Called only by explicit resolution edits or the reset button, never render.
+    """
+    width=int(cmds.getAttr('defaultResolution.width'))
+    height=int(cmds.getAttr('defaultResolution.height'))
+    if width<=0 or height<=0:raise ValueError('Image width and height must be positive')
+    cmds.setAttr('defaultResolution.lockDeviceAspectRatio',False)
+    cmds.setAttr('defaultResolution.pixelAspect',1.)
+    cmds.setAttr('defaultResolution.deviceAspectRatio',float(width)/height)
+
+
+def _resolution_field(attribute,label):
+    """Explicit edit callback; attrControlGrp's generated child bypasses cc."""
+    field=cmds.intFieldGrp(label=label,numberOfFields=1,value1=int(cmds.getAttr(attribute)))
+    def changed(*_):
+        value=int(cmds.intFieldGrp(field,query=True,value1=True))
+        if not 16<=value<=4096:
+            cmds.intFieldGrp(field,edit=True,value1=int(cmds.getAttr(attribute)))
+            raise ValueError('ReaPencil image dimensions must be between 16 and 4096 pixels')
+        cmds.undoInfo(openChunk=True,chunkName='ReaPencil resolution')
+        try:
+            cmds.setAttr(attribute,value)
+            _use_square_pixels()
+        finally:cmds.undoInfo(closeChunk=True)
+    cmds.intFieldGrp(field,edit=True,changeCommand=changed)
+    # Common-tab edits, presets and Undo must also update this field.
+    cmds.scriptJob(attributeChange=[attribute,lambda:cmds.intFieldGrp(field,edit=True,value1=int(cmds.getAttr(attribute)))],parent=field)
+    return field
+
+
 def _create_globals_tab():
     """ReaPencil-specific tab; Maya owns the standard Common tab hierarchy."""
     cmds.columnLayout(adjustableColumn=True)
@@ -242,14 +276,20 @@ def _create_globals_tab():
     for attribute, label in [('defaultRenderGlobals.imageFilePrefix', 'File prefix'),
                              ('defaultResolution.width', 'Width'),
                              ('defaultResolution.height', 'Height'),
-                             ('defaultResolution.pixelAspect', 'Pixel aspect (must be 1)'),
+                             ('defaultResolution.pixelAspect', 'Pixel aspect (square = 1)'),
                              ('defaultRenderGlobals.animation', 'Animation'),
                              ('defaultRenderGlobals.startFrame', 'Start frame'),
                              ('defaultRenderGlobals.endFrame', 'End frame'),
                              ('defaultRenderGlobals.byFrameStep', 'Frame step'),
                              ('defaultRenderGlobals.extensionPadding', 'Frame padding'),
                              ('defaultRenderGlobals.skipExistingFrames', 'Skip existing frames')]:
-        cmds.attrControlGrp(attribute=attribute, label=label)
+        if attribute in ('defaultResolution.width','defaultResolution.height'):
+            _resolution_field(attribute,label)
+        else:
+            cmds.attrControlGrp(attribute=attribute,label=label)
+        if attribute=='defaultResolution.pixelAspect':
+            cmds.button(label='Use square pixels',command=_use_square_pixels,
+                        annotation='Keep Width/Height and set Pixel Aspect Ratio to 1.')
     cmds.separator(height=10, style='in')
     cmds.text(label='Renderable cameras (Batch renders all enabled cameras)', align='left')
     for camera in cmds.ls(type='camera', long=True) or []:

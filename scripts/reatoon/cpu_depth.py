@@ -1,6 +1,6 @@
 """Compiled CPU depth-only rasterization for line visibility.
 
-Uses the optional existing Numba sidecar. No GPU work, shading or silent
+Uses the native CPU library or the optional Numba sidecar. No GPU work, shading or silent
 Python fallback: callers can explicitly choose their reference fallback when
 the accelerator is unavailable. Output arrays are modified in place.
 """
@@ -9,12 +9,6 @@ import numpy as np
 
 def rasterize_mesh(camverts, tris, camera, depth, depth_planes,
                    mesh_owners=None, mesh_index=-1):
-    from .accelerator import enable
-    enable()
-    try:
-        from ._depth_kernel import rasterize
-    except (ImportError, OSError, RuntimeError, AttributeError) as error:
-        raise RuntimeError('Compiled CPU depth accelerator unavailable: %s' % error) from error
     vertices=np.ascontiguousarray(camverts,dtype=np.float64)
     raw_triangles=np.asarray(tris)
     if raw_triangles.size and (not np.isfinite(raw_triangles).all()
@@ -38,6 +32,15 @@ def rasterize_mesh(camverts, tris, camera, depth, depth_planes,
             raise ValueError('Mesh owners must be writable contiguous integer camera image')
     else:
         mesh_owners=np.empty((1,1),np.int32)
+    from .native_cpu import depth as native_depth
+    count=native_depth(vertices,triangles,camera,depth,depth_planes,mesh_owners if has_owners else None,mesh_index)
+    if count is not None:return {'backend':'native-cpu-tiled-depth','triangles':count}
+    from .accelerator import enable
+    enable()
+    try:
+        from ._depth_kernel import rasterize
+    except (ImportError, OSError, RuntimeError, AttributeError) as error:
+        raise RuntimeError('Compiled CPU depth accelerator unavailable: %s' % error) from error
     count=rasterize(vertices,triangles,depth,depth_planes,mesh_owners,has_owners,int(mesh_index),
                     bool(camera['ortho']),float(camera['span']),float(camera['focal']),
                     float(camera['near']),float(camera['far']))

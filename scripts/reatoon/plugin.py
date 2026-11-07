@@ -135,6 +135,8 @@ def initializePlugin(plugin):
         utils.executeDeferred(ui.install_menu)
 
 def uninitializePlugin(plugin):
+    cache=sys.modules.get('reatoon.render_geometry_cache')
+    if cache is not None:cache.shutdown()
     from reatoon import viewport, render_integration, line_graph
     if not cmds.about(batch=True):
         from reatoon import ui
