@@ -23,6 +23,8 @@ def sync():
             for name in cmds.ls(type=('mesh','polyCrease','polySoftEdge')) or []:
                 sel=om.MSelectionList();sel.add(name)
                 viewport._node_callbacks.append(om.MNodeMessage.addAttributeChangedCallback(sel.getDependNode(0),edge_changed))
+                if sel.getDependNode(0).hasFn(om.MFn.kMesh):
+                    viewport._node_callbacks.append(om.MPolyMessage.addPolyTopologyChangedCallback(sel.getDependNode(0),viewport._scene_changed))
         viewport._watchers_stale=False;_watching=True
     key=viewport._fast_target_revision
     if key==_key:return
@@ -58,7 +60,7 @@ def sync():
 def edge_changed(message,plug,*_):
     if not message&om.MNodeMessage.kAttributeSet:return
     node=om.MFnDependencyNode(plug.node());name=plug.partialName(useLongNames=True).lower()
-    if node.typeName in ('polyCrease','polySoftEdge') or any(k in name for k in ('crease','edgesmoothing','normal')):
+    if node.typeName in ('polyCrease','polySoftEdge') or any(k in name for k in ('crease','edgesmoothing','normal','smooth','keepborder','keephard','boundary','continuity','osd')):
         from . import viewport
         viewport.request_refresh(graph_changed=True)
 
@@ -73,3 +75,17 @@ def edge_scope(panel):
 
 def diagnostics():
     return dict(_last_plan)
+
+
+def smooth_edge_pairs(name, pairs):
+    """One-time exact topology mapping for Maya legacy crease preview geometry.
+
+    Called by native authored-edge cache only when topology/options change.
+    Actual animated positions stay in native code, with camera frames cached.
+    """
+    from . import smooth_geometry
+    path=om.MSelectionList().add(name).getDagPath(0)
+    mesh=smooth_geometry.evaluate(path,purpose='viewport',as_arrays=True)
+    return [int(v) for pair in pairs
+            for child in mesh['base_edge_children'].get('%d,%d'%tuple(sorted(pair)), [])
+            for v in child]

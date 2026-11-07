@@ -18,10 +18,7 @@ for folder in ('scripts','plug-ins','rendererDesc'):
 copy(ROOT/'tools/install.py',Path('tools/install.py'))
 copy(ROOT/'distribution/README_PUBLIC.md',Path('README.md'))
 copy(ROOT/'docs/updates.md',Path('docs/updates.md'))
-copy(ROOT/'docs/release_019.md',Path('docs/release_019.md'))
-copy(ROOT/'docs/release_020.md',Path('docs/release_020.md'))
-copy(ROOT/'docs/release_021.md',Path('docs/release_021.md'))
-copy(ROOT/'docs/release_022.md',Path('docs/release_022.md'))
+for path in sorted((ROOT/'docs').glob('release_*.md')):copy(path,Path('docs')/path.name)
 for name in ('INSTALL.cmd','CHECK.cmd','SETUP.py','CHECK.py','INSTALL_KO.md'):
     copy(ROOT/'distribution'/name,Path(name))
     if name.endswith('.cmd'):
@@ -58,5 +55,6 @@ digest=hashlib.sha256(archive.read_bytes()).hexdigest()
 (destination/(NAME+'.sha256')).write_text(digest+'  '+archive.name+'\n',encoding='ascii')
 with ZipFile(archive) as zip:assert zip.testzip() is None
 result=dict(archive=str(archive),stage=str(stage),sha256=digest,bytes=archive.stat().st_size,files=len(manifest['files'])+1)
+(ROOT/'validation').mkdir(exist_ok=True)
 (ROOT/'validation/distribution_build.json').write_text(json.dumps(result,indent=2),encoding='utf-8')
 print(json.dumps(result,indent=2))

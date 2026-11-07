@@ -67,7 +67,11 @@ def candidates(mesh,face_styles,styles,selected_edges=None,cache=None):
         dot=np.einsum('ij,ij->i',np.repeat(first,p['counts'],axis=0),fn[p['owners']])
         minimum=np.minimum.reduceat(dot,p['starts'])
         crease=np.r_[np.cos(np.radians([s.get('crease_angle',45.) for s in styles])),1.]
-        static[:n]|=np.where((p['counts']>1)&(minimum<crease[own]-1e-8),enabled[:n]&8,0)
+        angle_mask=(p['counts']>1)&(minimum<crease[own]-1e-8)
+        if any(s.get('crease_angle_max',180.)<180. for s in styles):
+            upper=np.r_[np.cos(np.radians([s.get('crease_angle_max',180.) for s in styles])),-1.]
+            angle_mask &= minimum>=upper[own]-1e-8
+        static[:n]|=np.where(angle_mask,enabled[:n]&8,0)
     dynamic=((enabled&4)!=0)&np.r_[p['counts']>1,np.ones(len(p['diagonal_pairs']),bool)]
     if cache is not None and 'evaluate' in cache and not any(s.get('crease') for s in styles):
         keep=(owners>=0)&((static!=0)|dynamic)

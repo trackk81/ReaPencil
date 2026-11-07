@@ -287,6 +287,7 @@ def _refresh(ctx, selected=None):
 
 
 def _set_changed(ctx):
+    previous_tab=cmds.tabLayout(ctx['tabs'],query=True,selectTabIndex=True) if ctx.get('tabs') and cmds.tabLayout(ctx['tabs'],exists=True) else 1
     for key in ('objects', 'shaders'):
         cmds.textScrollList(ctx[key], edit=True, removeAll=True)
     selected = cmds.textScrollList(ctx['sets'], query=True, selectItem=True) or []
@@ -311,20 +312,35 @@ def _set_changed(ctx):
     cmds.checkBox(label=tr('On'), value=_active(node), changeCommand=lambda value: _safe(graph.set_active, node, value))
     _field(node,'lineset_id','Line Set ID (1–8)',values)
     tabs = cmds.tabLayout(innerMarginWidth=6, innerMarginHeight=5)
+    ctx['tabs']=tabs
     visible = cmds.columnLayout(adjustableColumn=True)
     _feature_fields(node, values)
     _brush_fields(node, values)
+    _specific_brush_fields(node,values,False,lambda:_set_changed(ctx))
     cmds.setParent(tabs)
     hidden = cmds.columnLayout(adjustableColumn=True)
     _field(node, 'hidden_lines', 'Draw hidden lines', values)
-    _field(node, 'hidden_color', 'Hidden color', values)
-    cmds.text(label=tr('Hidden lines use the same edge types and width.\nVP2 uses a dashed x-ray preview.'), align='left')
+    if not values.get('hidden_style'):_field(node, 'hidden_color', 'Hidden color', values)
+    def independent(enabled):
+        settings=graph.get_settings(node)
+        if enabled:
+            from .brush_channels import FILTER_KEYS
+            settings['hidden_style']={k:values[k] for k in FILTER_KEYS if k in values}
+            settings['hidden_style'].update(line_width=values['line_width'],line_color=values['hidden_color'])
+        else:settings.pop('hidden_style',None)
+        graph.set_settings(node,settings);_set_changed(ctx)
+    cmds.checkBox(label=tr('Independent hidden settings (CPU)'),value=bool(values.get('hidden_style')),changeCommand=lambda v:_safe(independent,v))
+    if values.get('hidden_style'):
+        _hidden_fields(node,values)
+        _specific_brush_fields(node,values,True,lambda:_set_changed(ctx))
+    cmds.text(label=tr('Independent filters and per-type brushes apply to CPU rendering. Viewport previews remain approximate.'),align='left',wordWrap=True,height=36)
     cmds.setParent(tabs)
     detail = cmds.columnLayout(adjustableColumn=True)
     for key, label in [('distance_reduction','Distance reduction'),('width_variation','Width variation'),
                        ('taper','Taper'),('dash_length','Dash length'),('dash_gap','Dash gap (-1 = length)'),
                        ('connect_collinear_dashes','Connect collinear dashes (CPU)')]:
         _field(node, key, label, values)
+    cmds.button(label=tr('Depth reduction (CPU)'),command=lambda *_:_edit_reduction(node))
     _field(node,'profile_direction','Stroke direction (degrees)',values)
     _field(node,'profile_split_angle','Stroke split angle (degrees)',values)
     _field(node,'profile_loop_direction','Loop direction (0=CW, 1=CCW)',values)
@@ -334,10 +350,106 @@ def _set_changed(ctx):
     cmds.text(label=tr('Taper and variation are supported by offline rendering.\nVP2 shows constant width per edge.'), align='left')
     cmds.setParent(tabs)
     cmds.tabLayout(tabs, edit=True, tabLabel=tr([(visible,'Visible Lines'),(hidden,'Hidden Lines'),(detail,'Brush Details')]))
+    cmds.tabLayout(tabs,edit=True,selectTabIndex=previous_tab)
+
+
+def _nested_setting(node,hidden,feature,key,value):
+    settings=graph.get_settings(node)
+    parent=settings.setdefault('hidden_style',{}) if hidden else settings
+    target=parent.setdefault('feature_brushes',{}).setdefault(feature,{}) if feature else parent
+    target[key]=value
+    graph.set_settings(node,settings)
+    from . import viewport
+    viewport.request_refresh(style_changed=True)
+
+
+def _blend_menu(value,set_value):
+    from .brush_blend import MODES
+    control=cmds.optionMenuGrp(label=tr('Blend mode (CPU)'))
+    for name in MODES:cmds.menuItem(label=tr(name))
+    cmds.optionMenuGrp(control,e=True,select=int(value)+1,changeCommand=lambda *_:set_value(cmds.optionMenuGrp(control,q=True,select=True)-1))
+    return control
+
+
+def _nested_profile_fields(node,hidden,feature):
+    def current(key):
+        settings=graph.get_settings(node);parent=settings.get('hidden_style',{}) if hidden else settings
+        target=parent.get('feature_brushes',{}).get(feature,{}) if feature else parent
+        return target.get(key,[])
+    for key,label in [('width_profile','Width profile (CPU)'),('alpha_profile','Alpha profile (CPU)')]:
+        def edit(*_,k=key):
+            from .profile_editor import open_editor
+            return open_editor(node,k,getter=lambda:current(k),setter=lambda p:_nested_setting(node,hidden,feature,k,p))
+        cmds.button(label=tr(label),command=edit)
+    values=dict(maya_scene.DEFAULT_SETTINGS);settings=graph.get_settings(node);parent=settings.get('hidden_style',{}) if hidden else settings
+    if feature:values.update(parent.get('feature_brushes',{}).get(feature,{}))
+    else:values.update(parent)
+    for key,label in [('profile_direction','Stroke direction (degrees)'),('profile_split_angle','Stroke split angle (degrees)'),('profile_loop_direction','Loop direction (0=CW, 1=CCW)'),('pencil_profile_width','Match Pencil+ profile widths (CPU)')]:
+        _nested_field(node,hidden,feature,key,label,values[key])
+
+
+def _nested_field(node,hidden,feature,key,label,value):
+    set_value=lambda v:_safe(_nested_setting,node,hidden,feature,key,v)
+    if key=='blend_mode':
+        return _blend_menu(value,set_value)
+    if isinstance(value,bool):cmds.checkBox(label=tr(label),value=value,changeCommand=set_value)
+    elif key=='line_color':
+        control=cmds.colorSliderGrp(label=tr(label),rgbValue=value)
+        callback=lambda *_:set_value(cmds.colorSliderGrp(control,q=True,rgbValue=True))
+        cmds.colorSliderGrp(control,e=True,changeCommand=callback,dragCommand=callback)
+    else:
+        control=cmds.floatFieldGrp(label=tr(label),numberOfFields=1,value1=value,precision=3)
+        cmds.floatFieldGrp(control,e=True,changeCommand=lambda *_:set_value(cmds.floatFieldGrp(control,q=True,value1=True)))
+
+
+def _hidden_fields(node,values):
+    from .brush_channels import BRUSH_KEYS
+    hidden=dict(values);hidden.update({k:maya_scene.DEFAULT_SETTINGS[k] for k in BRUSH_KEYS})
+    hidden.update(line_color=values['hidden_color'],line_width=values['line_width']);hidden.update(values['hidden_style'])
+    frame=cmds.frameLayout(label=tr('Hidden filters and brush (CPU)'),collapsable=True,collapse=False)
+    cmds.columnLayout(adjustableColumn=True)
+    for key,label in [('outline','Outline'),('open_edges','Open edges'),('hard_edges','Hard edges'),('crease','Crease'),
+                      ('material_boundaries','Material boundaries'),('wireframe','All polygon edges'),
+                      ('selected_edges','Stored selected edges'),('intersections','Object intersections'),('self_intersections','Self intersections'),
+                      ('crease_angle','Normal angle minimum'),('crease_angle_max','Normal angle maximum'),
+                      ('line_color','Line color'),('line_width','Line width'),('line_opacity','Brush opacity (CPU)'),('blend_mode','Blend mode (CPU)'),('dash_length','Dash length'),('dash_gap','Dash gap (-1 = length)')]:
+        _nested_field(node,True,None,key,label,hidden[key])
+    _nested_profile_fields(node,True,None)
+    cmds.button(label=tr('Hidden depth reduction (CPU)'),command=lambda *_:_edit_reduction(node,True))
+    cmds.setParent(frame);cmds.setParent('..')
+
+
+def _specific_brush_fields(node,values,hidden,refresh):
+    base=dict(values,line_color=values['hidden_color']) if hidden else dict(values)
+    if hidden:
+        base['feature_brushes']={}
+        base.update(values.get('hidden_style',{}))
+    current=base.get('feature_brushes',{})
+    frame=cmds.frameLayout(label=tr('Per-type brushes (CPU)'),collapsable=True,collapse=True)
+    cmds.columnLayout(adjustableColumn=True)
+    for feature,label in [('outline','Outline'),('intersection','Object intersections'),('hard','Hard edges'),
+                          ('material','Material boundaries'),('selected','Stored selected edges'),('crease','Crease'),('wireframe','All polygon edges')]:
+        def toggle(enabled,f=feature):
+            settings=graph.get_settings(node);parent=settings.setdefault('hidden_style',{}) if hidden else settings
+            brushes=parent.setdefault('feature_brushes',{})
+            if enabled:brushes[f]=dict(line_color=base['line_color'],line_width=base['line_width'])
+            else:brushes.pop(f,None)
+            graph.set_settings(node,settings);refresh()
+        cmds.checkBox(label=tr(label),value=feature in current,changeCommand=lambda v,fn=toggle:_safe(fn,v))
+        if feature in current:
+            from .brush_channels import BRUSH_KEYS
+            brush=dict(base);brush.update({k:maya_scene.DEFAULT_SETTINGS[k] for k in BRUSH_KEYS})
+            brush.update(line_color=base['line_color'],line_width=base['line_width']);brush.update(current[feature])
+            for key,label in [('line_color','Line color'),('line_width','Line width'),('line_opacity','Brush opacity (CPU)'),('blend_mode','Blend mode (CPU)'),('dash_length','Dash length'),('dash_gap','Dash gap (-1 = length)')]:
+                _nested_field(node,hidden,feature,key,label,brush[key])
+            _nested_profile_fields(node,hidden,feature)
+    cmds.setParent(frame);cmds.setParent('..')
 
 
 def _field(node, key, label, values):
     value = values[key]
+    if key=='blend_mode':
+        return _blend_menu(value,lambda v:_safe(_setting,node,key,v))
     if isinstance(maya_scene.DEFAULT_SETTINGS[key], bool):
         cmds.checkBox(label=tr(label), value=value, changeCommand=lambda v: _safe(_setting,node,key,v))
     elif isinstance(value, (list, tuple)):
@@ -361,7 +473,8 @@ def _feature_fields(node, values):
                        ('material_boundaries','Material boundaries'),('selected_edges','Stored selected edges'),
                        ('crease','Crease'),('wireframe','All polygon edges'),('merge_groups','Use merge groups')]:
         _field(node,key,label,values)
-    _field(node,'crease_angle','Crease angle',values)
+    _field(node,'crease_angle','Normal angle minimum',values)
+    _field(node,'crease_angle_max','Normal angle maximum',values)
     cmds.setParent(frame)
     cmds.setParent('..')
 
@@ -370,7 +483,8 @@ def _brush_fields(node, values):
     frame = cmds.frameLayout(label=tr('Brush'), collapsable=True, collapse=False)
     cmds.columnLayout(adjustableColumn=True)
     _field(node,'line_color','Color',values)
-    _field(node,'line_opacity','Opacity (CPU; one visible brush)',values)
+    _field(node,'line_opacity','Brush opacity (CPU)',values)
+    _field(node,'blend_mode','Blend mode (CPU)',values)
     _field(node,'relative_line_size','Relative size (640 px width)',values)
     _field(node,'line_width','Size (pixels)',values)
     _field(node,'brush_size_scale','Width multiplier (CPU)',values)
@@ -595,3 +709,8 @@ def _build_ae(ctx):
 def _edit_profile(node,key):
     from .profile_editor import open_editor
     open_editor(node,key)
+
+
+def _edit_reduction(node,hidden=False):
+    from .reduction_editor import open_editor
+    return open_editor(node,hidden)

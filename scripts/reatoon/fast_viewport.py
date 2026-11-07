@@ -29,7 +29,7 @@ def register():
         raise RuntimeError('Fast preview requires Viewport 2.0 OpenGL Core Profile; the precise viewport remains available.')
     if _library is None:
         root=Path(__file__).resolve().parents[2]
-        path=root/'plug-ins'/str(cmds.about(version=True))/'reaPencilFast094.mll'
+        path=root/'plug-ins'/str(cmds.about(version=True))/'reaPencilFast146.mll'
         if not path.is_file():raise RuntimeError('Fast preview module is unavailable for this Maya version')
         _plugin=cmds.loadPlugin(str(path),quiet=True)[0]
         cmds.pluginInfo(_plugin,e=True,autoload=False)

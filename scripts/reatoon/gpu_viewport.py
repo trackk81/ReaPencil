@@ -72,10 +72,11 @@ def _smooth_world(fn,path,divisions):
 class LiveScene:
     def __init__(self, camera_path, settings, camera,retained=False,geometry_cache=None):
         started=time.perf_counter()
+        from . import viewport_alpha
         self.scene = maya_scene.export_scene(camera_path.fullPathName(),settings,camera_override=camera,
                                             include_normals=False,geometry_purpose='viewport',
                                             include_materials=False,as_arrays=True,
-                                            mesh_filter=None if retained else camera.get('_viewport_mesh_filter'),geometry_cache=geometry_cache)
+                                            mesh_filter=None if retained else camera.get('_viewport_mesh_filter'),geometry_cache=geometry_cache,alpha_configuration=viewport_alpha.configuration)
         exported=time.perf_counter()
         self.empty=not self.scene['meshes']
         if retained and len(self.scene['meshes'])<=256:
@@ -254,6 +255,8 @@ class LiveScene:
             return self.groups,dict(self.report,draw_cache_hit=True,prepare_ms=(time.perf_counter()-started)*1000)
         if self.style_passes is None or self.style_key!=style_key:
             self.style_passes=renderer.line_style_passes(self.scene,settings)
+            from . import preview_settings
+            preview_settings.filter_passes(self.style_passes)
             for item in self.style_passes:
                 if item['line']:
                     nodes=line_graph.list_sets(item['line'])

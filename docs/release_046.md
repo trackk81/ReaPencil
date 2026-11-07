@@ -1,0 +1,1 @@
+Normal Preview automatically reads supported material opacity textures without writing alpha-boundary scene attributes. Explicit alpha settings keep precedence. Cached clipping stays independent of camera movement; opacity network changes rebuild viewport data. Final CPU render keeps the original default export path.

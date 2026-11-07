@@ -1,5 +1,5 @@
 // Native batched profile stage derived from our own strict CPU segment stage.
-static int profile_segment_range(const double* us,const double* luts,const int64_t* offsets,const uint8_t* alpha_profiles,const double* points,const double* widths,const double* biases,const double* colors,const uint8_t* only,const uint8_t* enabled,int64_t n,const double* depth,const double* planes,float* visible,int w,int h,int ss,int ortho,double span,double focal,double nearz,double farz,const rpvis::Context* context,const double* eye,const double* basis,SegmentResult* result,int rowlo,int rowhi) noexcept {
+static int profile_segment_range(const double* us,const double* luts,const int64_t* offsets,const uint8_t* alpha_profiles,const double* points,const double* widths,const double* biases,const double* colors,const uint8_t* only,const uint8_t* enabled,int64_t n,const double* depth,const double* planes,float* visible,int w,int h,int ss,int ortho,double span,double focal,double nearz,double farz,const rpvis::Context* context,const double* eye,const double* basis,const int* group_image,const int* group_ids,int64_t* merged,const double* depth_range,SegmentResult* result,int rowlo,int rowhi,const double* reductions,const double* size_reductions,const double* alpha_references=nullptr,const double* width_references=nullptr) noexcept {
  try{*result={};std::vector<double> records;std::vector<float> edge;
  for(int64_t index=0;index<n;++index){double width=widths[index];if(width<=0||!enabled[index])continue;auto p=points+index*6;double lo=0,hi=1,dz=p[5]-p[2];
  if(std::abs(dz)<1e-14){if(p[2]<nearz||p[2]>farz)continue;}else{double t0=(nearz-p[2])/dz,t1=(farz-p[2])/dz;lo=std::max(lo,std::min(t0,t1));hi=std::min(hi,std::max(t0,t1));if(lo>hi)continue;}
@@ -23,7 +23,19 @@ static int profile_segment_range(const double* us,const double* luts,const int64
    if(!touched){edge.assign(int64_t(ymax-ymin)*(xmax-xmin)*4,0);touched=true;}
    double row[7]={ax*ss-xmin,ay*ss-ymin,bx*ss-xmin,by*ss-ymin,colors[index*3],colors[index*3+1],colors[index*3+2]};
    double original[4]={px-xmin,py-ymin,qx-xmin,qy-ymin};auto off=offsets+index*4;
-   rp_profile_runs(edge.data(),xmax-xmin,ymax-ymin,int64_t(xmax-xmin)*4,row,1,original,u0,u1,width*ss,(alpha_profiles[index]&2)?double(ss):0.,luts+off[0]*2,int(off[1]),luts+off[2]*2,int(off[3]));
+   double depth_values[5]={a[2],b[2],depth_range?depth_range[0]:0.,depth_range?depth_range[1]:1.,double(ortho)};
+   const double* reduction=reductions?reductions+index*4:nullptr;
+   double alpha_depth[7]={a[2],b[2],double(ortho),reduction?reduction[0]:0.,reduction?reduction[1]:0.,reduction?reduction[2]:0.,reduction?reduction[3]:0.};
+   const double* size_reduction=size_reductions?size_reductions+index*4:nullptr;
+   double width_depth[7]={a[2],b[2],double(ortho),size_reduction?size_reduction[0]:0.,size_reduction?size_reduction[1]:0.,size_reduction?size_reduction[2]:0.,size_reduction?size_reduction[3]:0.};
+   double ar[9],wr[9];
+   auto reference=[&](const double* rows,double* output)->const double*{
+    if(!rows||rows[index*4]==0)return nullptr;const double* origin=rows+index*4+1;
+    output[0]=a[2];output[1]=b[2];output[2]=double(ortho);
+    for(int axis=0;axis<3;++axis){output[3+axis]=eye[axis]+a[0]*basis[axis]+a[1]*basis[3+axis]+a[2]*basis[6+axis]-origin[axis];output[6+axis]=eye[axis]+b[0]*basis[axis]+b[1]*basis[3+axis]+b[2]*basis[6+axis]-origin[axis];}
+    return output;
+   };
+   profile_runs(edge.data(),xmax-xmin,ymax-ymin,int64_t(xmax-xmin)*4,row,1,original,u0,u1,width*ss,(alpha_profiles[index]&2)?double(ss):0.,luts+off[0]*2,int(off[1]),luts+off[2]*2,int(off[3]),depth_range?depth_values:nullptr,reduction&&reduction[1]>reduction[0]?alpha_depth:nullptr,size_reduction&&size_reduction[1]>size_reduction[0]?width_depth:nullptr,reference(alpha_references,ar),reference(width_references,wr));
   }
  };
  for(int k=0;k<count;++k){double t0=lo+k*step,t1=k+1==count?hi:lo+(k+1)*step,mid=(t0+t1)*.5,x=px+mid*dx,y=py+mid*dy,z=ortho?a[2]+mid*(b[2]-a[2]):1/((1-mid)/a[2]+mid/b[2]);
@@ -32,6 +44,11 @@ static int profile_segment_range(const double* us,const double* luts,const int64
  if(context&&front&&z>surface+256*rpvis::epsilon*std::max(1.,std::abs(z))){double rx=(x-w/2.)/(ortho?w/span:focal),ry=-(y-h/2.)/(ortho?w/span:focal),origin[3],direction[3];
  for(int axis=0;axis<3;++axis){if(ortho){origin[axis]=eye[axis]+rx*basis[axis]+ry*basis[3+axis];direction[axis]=basis[6+axis];}else{origin[axis]=eye[axis];direction[axis]=rx*basis[axis]+ry*basis[3+axis]+basis[6+axis];}}
  if(owns)++result->checked;if(rpvis::occluded(origin,direction,nearz,z,*context)){if(owns)++result->hidden;front=false;}}
+ if(group_image&&group_ids&&group_ids[index]>=0){int gid=group_ids[index];double nx=-dy/std::max(length,1e-12)*ss,ny=dx/std::max(length,1e-12)*ss;bool both=true;
+  for(int side=-1;side<=1;side+=2){int gx=int(std::floor(x+side*nx)),gy=int(std::floor(y+side*ny));
+   if(gx<0||gy<0||gx>=w||gy>=h||group_image[int64_t(gy)*w+gx]!=gid){both=false;break;}}
+  if(both){if(owns&&merged)++*merged;if(run){record();run=false;}continue;}}
+ if(enabled[index]&2)front=!front;
  if(!front){if(run){record();run=false;}continue;}
  double sx=px+t0*dx,sy=py+t0*dy,ex=px+t1*dx,ey=py+t1*dy;
 
@@ -45,13 +62,14 @@ static int profile_segment_range(const double* us,const double* luts,const int64
 // Disjoint row bands retain exactly the original painter order at every pixel.
 // A crossing edge keeps its original scratch coordinates and float32 arithmetic.
 // Vector records and diagnostic counts belong to the band containing its top.
-API int rp_profile_segments(const double* us,const double* luts,const int64_t* offsets,const uint8_t* alpha_profiles,const double* points,const double* widths,const double* biases,const double* colors,const uint8_t* only,const uint8_t* enabled,int64_t n,const double* depth,const double* planes,float* visible,int w,int h,int ss,int ortho,double span,double focal,double nearz,double farz,const rpvis::Context* context,const double* eye,const double* basis,SegmentResult* result) noexcept {
+static int profile_segments_impl(const double* us,const double* luts,const int64_t* offsets,const uint8_t* alpha_profiles,const double* points,const double* widths,const double* biases,const double* colors,const uint8_t* only,const uint8_t* enabled,int64_t n,const double* depth,const double* planes,float* visible,int w,int h,int ss,int ortho,double span,double focal,double nearz,double farz,const rpvis::Context* context,const double* eye,const double* basis,const int* group_image,const int* group_ids,int64_t* merged,const double* depth_range,SegmentResult* result,const double* reductions,const double* size_reductions,const double* alpha_references=nullptr,const double* width_references=nullptr) noexcept {
  unsigned workers=n>=10000?std::min(8u,std::max(1u,std::thread::hardware_concurrency())):1;
  struct Rows {std::vector<SegmentResult> data;Rows(unsigned n):data(n){}~Rows(){for(auto& r:data)delete[] r.rows;}};
  try{Rows parts(workers);
-  std::vector<int> codes(workers);std::vector<std::thread> threads;
-  auto run=[&](unsigned i){codes[i]=profile_segment_range(us,luts,offsets,alpha_profiles,points,widths,biases,colors,only,enabled,n,depth,planes,visible,w,h,ss,ortho,span,focal,nearz,farz,context,eye,basis,&parts.data[i],int(i*h/workers),int((i+1)*h/workers));};
+  std::vector<int> codes(workers);std::vector<int64_t> merge_counts(workers);std::vector<std::thread> threads;
+  auto run=[&](unsigned i){codes[i]=profile_segment_range(us,luts,offsets,alpha_profiles,points,widths,biases,colors,only,enabled,n,depth,planes,visible,w,h,ss,ortho,span,focal,nearz,farz,context,eye,basis,group_image,group_ids,&merge_counts[i],depth_range,&parts.data[i],int(i*h/workers),int((i+1)*h/workers),reductions,size_reductions,alpha_references,width_references);};
   try{for(unsigned i=1;i<workers;++i)threads.emplace_back(run,i);}catch(...){for(auto& t:threads)t.join();throw;}run(0);for(auto& t:threads)t.join();
+  if(merged){*merged=0;for(auto c:merge_counts)*merged+=c;}
   *result={};int64_t size=0;for(unsigned i=0;i<workers;++i){if(codes[i])return -1;size+=parts.data[i].size;result->checked+=parts.data[i].checked;result->hidden+=parts.data[i].hidden;}
   struct Row {double value[5];};std::vector<Row> rows;rows.reserve(size);
   for(auto& r:parts.data)for(int64_t i=0;i<r.size;++i){Row row;std::copy(r.rows+i*5,r.rows+i*5+5,row.value);rows.push_back(row);}
@@ -61,3 +79,10 @@ API int rp_profile_segments(const double* us,const double* luts,const int64_t* o
 }
 
 API void rp_profile_free(double* rows) noexcept {delete[] rows;}
+
+API int rp_profile_segments(const double* us,const double* luts,const int64_t* offsets,const uint8_t* alpha_profiles,const double* points,const double* widths,const double* biases,const double* colors,const uint8_t* only,const uint8_t* enabled,int64_t n,const double* depth,const double* planes,float* visible,int w,int h,int ss,int ortho,double span,double focal,double nearz,double farz,const rpvis::Context* context,const double* eye,const double* basis,const int* group_image,const int* group_ids,int64_t* merged,const double* depth_range,SegmentResult* result) noexcept {return profile_segments_impl(us,luts,offsets,alpha_profiles,points,widths,biases,colors,only,enabled,n,depth,planes,visible,w,h,ss,ortho,span,focal,nearz,farz,context,eye,basis,group_image,group_ids,merged,depth_range,result,nullptr,nullptr);}
+API int rp_profile_segments_reduced(const double* us,const double* luts,const int64_t* offsets,const uint8_t* alpha_profiles,const double* points,const double* widths,const double* biases,const double* colors,const uint8_t* only,const uint8_t* enabled,int64_t n,const double* depth,const double* planes,float* visible,int w,int h,int ss,int ortho,double span,double focal,double nearz,double farz,const rpvis::Context* context,const double* eye,const double* basis,const int* group_image,const int* group_ids,int64_t* merged,const double* depth_range,SegmentResult* result,const double* reductions) noexcept {return profile_segments_impl(us,luts,offsets,alpha_profiles,points,widths,biases,colors,only,enabled,n,depth,planes,visible,w,h,ss,ortho,span,focal,nearz,farz,context,eye,basis,group_image,group_ids,merged,depth_range,result,reductions,nullptr);}
+
+API int rp_profile_segments_depth_width(const double* us,const double* luts,const int64_t* offsets,const uint8_t* alpha_profiles,const double* points,const double* widths,const double* biases,const double* colors,const uint8_t* only,const uint8_t* enabled,int64_t n,const double* depth,const double* planes,float* visible,int w,int h,int ss,int ortho,double span,double focal,double nearz,double farz,const rpvis::Context* context,const double* eye,const double* basis,const int* group_image,const int* group_ids,int64_t* merged,const double* depth_range,SegmentResult* result,const double* reductions,const double* size_reductions) noexcept {return profile_segments_impl(us,luts,offsets,alpha_profiles,points,widths,biases,colors,only,enabled,n,depth,planes,visible,w,h,ss,ortho,span,focal,nearz,farz,context,eye,basis,group_image,group_ids,merged,depth_range,result,reductions,size_reductions);}
+
+API int rp_profile_segments_reference(const double* us,const double* luts,const int64_t* offsets,const uint8_t* alpha_profiles,const double* points,const double* widths,const double* biases,const double* colors,const uint8_t* only,const uint8_t* enabled,int64_t n,const double* depth,const double* planes,float* visible,int w,int h,int ss,int ortho,double span,double focal,double nearz,double farz,const rpvis::Context* context,const double* eye,const double* basis,const int* group_image,const int* group_ids,int64_t* merged,const double* depth_range,SegmentResult* result,const double* reductions,const double* size_reductions,const double* alpha_references,const double* width_references) noexcept {return profile_segments_impl(us,luts,offsets,alpha_profiles,points,widths,biases,colors,only,enabled,n,depth,planes,visible,w,h,ss,ortho,span,focal,nearz,farz,context,eye,basis,group_image,group_ids,merged,depth_range,result,reductions,size_reductions,alpha_references,width_references);}

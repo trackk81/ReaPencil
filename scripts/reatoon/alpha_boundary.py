@@ -51,7 +51,14 @@ def _triangulate_contours(loops):
     actual=np.abs(geometry._cross(tris[:,1]-tris[:,0],tris[:,2]-tris[:,0])).sum()*.5
     expected=sum(abs(a)*(-1 if depth%2 else 1) for a,depth in zip(areas,depths))
     if abs(actual-expected)>max(1e-8,expected*1e-6):
-        raise ValueError('Maya could not triangulate the alpha holes faithfully; reduce Simplify')
+        # Maya can return overlapping triangles for foliage with hundreds of
+        # holes in one polygon. Preserve the exact contours and threshold;
+        # retry a CPU odd-winding tessellator instead of reducing resolution.
+        from .alpha_tessellation import triangulate
+        tris=triangulate(loops)
+        actual=np.abs(geometry._cross(tris[:,1]-tris[:,0],tris[:,2]-tris[:,0])).sum()*.5
+        if abs(actual-expected)>max(1e-8,expected*1e-6):
+            raise ValueError('Alpha contours overlap after simplification; reduce Simplify')
     return tris
 
 

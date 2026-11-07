@@ -1,0 +1,1 @@
+Fast Preview authored edges now follow Smooth Mesh Preview. Sparse subdivision stencils and cached legacy Maya crease positions avoid camera-motion subdivision work. CPU renderer unchanged from installed042. Local review only.

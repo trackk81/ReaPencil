@@ -11,9 +11,9 @@ Windows x64 / Autodesk Maya 2025용 독립 NPR 라인 플러그인입니다.
 
 Pencil+의 전체 기능이나 동일한 렌더 결과를 보장하지 않습니다. PSOFT의 실행 파일, 스크립트, 아이콘, 셰이더는 포함하지 않습니다. Maya SDK 헤더·라이브러리는 저장소에 포함하지 않으며, 네이티브 모듈을 다시 빌드하려면 Maya 2025 SDK와 MSVC가 필요합니다.
 
-## 0.8.19 변경
+## 0.8.48 변경
 
-CPU 렌더 준비·교차선·가림 처리를 개선하고 커스텀 해상도의 픽셀 비율 문제를 수정했습니다. 대시 간격·상대 크기, 제한된 단일 브러시 불투명도 및 평탄한 Linear profile 이관을 추가했습니다. Pencil+ 없는 환경의 저장 프로파일 복원은 검증한 ASCII/FOR8 compact 형식에 한정됩니다. 전체 Bezier/Spline·브러시 합성·획 위상 동등성은 아직 미지원입니다. 자세한 범위는 [0.8.19 변경 사항](docs/release_019.md)을 확인하세요.
+일반 Preview 재질 알파 자동 인식·고해상도 경계 품질·복잡한 구멍 처리를 개선했습니다. 알파 경계 생성·메시 준비를 동일 품질에서 평균12.44초에서6.13초로 줄였습니다(통제 장면, 별도 Maya4회). Fast Preview의 소수점 선폭·스무스 에지와 뷰포트 성능 설정, 독립 브러시·합성·거리 감소 개선을 포함합니다. [전체 변경과 검증 범위](docs/release_048.md)를 확인하세요. 최종 렌더는 CPU입니다.
 
 ## 처음 설치
 
@@ -28,13 +28,13 @@ import reapencil_start
 reapencil_start.launch()
 ```
 
-Plug-in Manager의 기본 파일은 **reaPencil.py**입니다. Maya가 허용 여부를 물으면 설치한 파일과 경로를 직접 확인하세요. GPU 화면 표시용 **reaPencilDraw090.mll**은 메인 플러그인이 자동으로 불러오는 보조 모듈입니다.
+Plug-in Manager의 기본 파일은 **reaPencil.py**입니다. Maya가 허용 여부를 물으면 설치한 파일과 경로를 직접 확인하세요. GPU 화면 표시용 **reaPencilDraw084.mll**은 메인 플러그인이 자동으로 불러오는 보조 모듈입니다.
 
 ## 고속 프리뷰
 
-**뷰포트 Renderer → ReaPencil Fast Preview**를 선택합니다. 정밀 표시는 **Renderer → ReaPencil Preview**, 끄기는 **Renderer → Viewport 2.0**입니다. **Renderer 목록의 ReaPencil Fast Preview 오른쪽 옵션 버튼**에서 굵기·색상을 조절합니다. ReaPencil Preview 오른쪽 옵션 버튼은 기존 렌더·라인 설정을 엽니다. 라인셋의 오브젝트·재질 대상을 반영합니다. 화면 깊이 기반의 교차선과 브러시 표현은 근사이며, 정밀 모드와 동일한 결과를 보장하지 않습니다. 기존 정밀 표시로 돌아가려면 **Renderer → ReaPencil Preview**를 선택하세요. 최종 렌더는 CPU 그대로입니다.
+**뷰포트 Renderer → ReaPencil Fast Preview**를 선택합니다. 정밀 표시는 **Renderer → ReaPencil Preview**, 끄기는 **Renderer → Viewport 2.0**입니다. **Renderer 목록의 ReaPencil Fast Preview 오른쪽 옵션 버튼**에서 굵기·색상을 조절합니다. ReaPencil Preview 오른쪽 옵션 버튼은 스무스 선·교차선 등 뷰포트 성능 설정을 엽니다. 라인 스타일은 Line Window에서 편집합니다. 라인셋의 오브젝트·재질 대상을 반영합니다. 화면 깊이 기반의 교차선과 브러시 표현은 근사이며, 정밀 모드와 동일한 결과를 보장하지 않습니다. 기존 정밀 표시로 돌아가려면 **Renderer → ReaPencil Preview**를 선택하세요. 최종 렌더는 CPU 그대로입니다.
 
-이 옵션은 Viewport 2.0 OpenGL Core Profile을 사용하며 **reaPencilFast094.mll**을 자동으로 불러옵니다. 리깅 자체가 느리면 프리뷰를 바꿔도 그 평가 비용은 남습니다.
+이 옵션은 Viewport 2.0 OpenGL Core Profile을 사용하며 **reaPencilFast146.mll**을 자동으로 불러옵니다. 리깅 자체가 느리면 프리뷰를 바꿔도 그 평가 비용은 남습니다.
 
 ## 이후 업데이트
 
@@ -53,6 +53,6 @@ Choose English or 한국어 in ReaPencil → ReaPencil Settings. The choice is s
 Fast Preview options include Hard edges and Authored crease edges. Crease edges use Maya edge crease weights greater than zero, independent of face angle. Both switches are off by default and are saved with the preview preferences. The optional overlay reads deformed positions only for targeted meshes containing marked edges; its cost depends on edge and deformer counts. Line-set object/material targets, visibility, isolate and depth occlusion remain in effect.
 
 
-## 0.8.20 로컬 검토 후보
+## 소스와 배포본
 
-비상수 선폭·알파 곡선의 CPU 래스터와 저장된 Linear/Spline/Bezier/Break 핸들 평가, 제어점 편집기를 추가했습니다. 기존 기본 선 렌더 경로는 유지됩니다. 코너·폐곡선·분기·교차선의 원본 획 배분, 다중/독립 숨은 브러시 알파, 곡선 벡터 출력과 뷰포트 표현은 제한됩니다. [검토 후보 변경 사항](docs/release_020.md)을 확인하세요. 아직 GitHub에 게시하지 않았습니다.
+이 태그의 runtime 파일은 검증한0.8.48 배포 ZIP과 일치합니다. CPU brush 소스는 배포 DLL125의 빌드 입력이며, Fast Preview 소스는 배포 DLL146의 빌드 입력입니다. 미설치 CPU 실험 코드는 포함하지 않습니다. 과거 변경 기록의 “로컬 후보” 표기는 당시 검증 상태이며, 현재 배포 범위는0.8.48 변경 사항을 기준으로 합니다.

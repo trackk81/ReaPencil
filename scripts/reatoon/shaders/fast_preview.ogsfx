@@ -32,9 +32,9 @@ GLSLShader FastPixel {
         p=clamp(p,ivec2(0),ivec2(imageSize)-1);float own=texelFetch(targetSampler,p,0).r,scene=depthAt(p);
         return own<.999999&&abs(own-scene)<=4./16777215.;
     }
-    void main(){
-        vec4 base=texture(colorSampler,uv);ivec2 p=ivec2(uv*imageSize);int radius=max(int(floor(lineWidth*.5+.5)),1);
-        float center=depthAt(p),l=depthAt(p-ivec2(radius,0)),r=depthAt(p+ivec2(radius,0));
+    float coverageAt(ivec2 p,int radius,float center){
+        if(radius==0)return 0.;
+        float l=depthAt(p-ivec2(radius,0)),r=depthAt(p+ivec2(radius,0));
         float d=depthAt(p-ivec2(0,radius)),u=depthAt(p+ivec2(0,radius));
         float coverage=0.;bool here=center<.999999;
         if((l<.999999)!=here||(r<.999999)!=here||(d<.999999)!=here||(u<.999999)!=here)coverage=1.;
@@ -55,8 +55,19 @@ GLSLShader FastPixel {
         bool allowed=targeted(p);
         // Extend only into empty background, never across an untargeted surface.
         if(!here)allowed=targeted(p+ivec2(radius,0))||targeted(p-ivec2(radius,0))||targeted(p+ivec2(0,radius))||targeted(p-ivec2(0,radius));
-        result=vec4(mix(base.rgb,lineColor.rgb,allowed?coverage:0.),base.a);
+        return allowed?coverage:0.;
     }
+    void main(){
+        vec4 base=texture(colorSampler,uv);ivec2 p=ivec2(uv*imageSize);
+        float radius=max(lineWidth,0.)*.5;
+        int lower=int(floor(radius));float fraction=radius-float(lower);
+        float center=depthAt(p),coverage=coverageAt(p,lower,center);
+        // Width<=2 evaluates only radius1 (radius0 is an immediate zero).
+        // Exact even widths need one sample ring; fractional widths need two.
+        if(fraction>0.)coverage=mix(coverage,coverageAt(p,lower+1,center),fraction);
+        result=vec4(mix(base.rgb,lineColor.rgb,coverage),base.a);
+    }
+
 }
 technique Main {pass P {
     VertexShader(in Input,out Interpolated)=FastVertex;

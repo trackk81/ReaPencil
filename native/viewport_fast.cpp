@@ -23,6 +23,8 @@
 #include <maya/MDoubleArray.h>
 #include <maya/MUIDrawManager.h>
 #include <maya/MPointArray.h>
+#include <maya/MNodeMessage.h>
+#include <maya/MFloatPointArray.h>
 #include <array>
 #include <functional>
 using namespace MHWRender;
@@ -112,9 +114,21 @@ public:
     MUint64 getObjectTypeExclusions()override{return selected.length()?kExcludeNurbsCurves|kExcludeLocators|kExcludeJoints:kExcludeAll;}
     MClearOperation& clearOperation()override{mClearOperation.setMask(MClearOperation::kClearAll);return mClearOperation;}
 };
-struct MarkedMesh {MDagPath path;int vertices=0,edges=0;std::vector<std::array<int,2>> pairs;};
+#include "fast_edge_smooth.h"
+extern "C" __declspec(dllexport) unsigned rp_fast_legacy_mapped(){return edgeSmooth::legacyMapped;}
+extern "C" __declspec(dllexport) unsigned rp_fast_legacy_rejected(){return edgeSmooth::legacyRejected;}
+extern "C" __declspec(dllexport) unsigned rp_fast_legacy_evaluations(){return edgeSmooth::legacyEvaluations;}
+extern "C" __declspec(dllexport) unsigned rp_fast_disk_hits(){return edgeDisk::hits;}
+extern "C" __declspec(dllexport) unsigned rp_fast_disk_writes(){return edgeDisk::writes;}
+static unsigned smoothBuilds=0,smoothUpdates=0;
+extern "C" __declspec(dllexport) unsigned rp_fast_smooth_builds(){return smoothBuilds;}
+extern "C" __declspec(dllexport) unsigned rp_fast_smooth_updates(){return smoothUpdates;}
+struct MeshStamp {bool dirty=true;MCallbackId callback=0;~MeshStamp(){if(callback)MMessage::removeCallback(callback);}};
+static unsigned positionReads=0;
+extern "C" __declspec(dllexport) unsigned rp_fast_position_reads(){return positionReads;}
+struct MarkedMesh {std::shared_ptr<MeshStamp> stamp;unsigned batchOffset=0;bool outputDirty=false;MPointArray world;MFloatPointArray output;MUintArray drawIndices;MMatrix lastWorld,lastProjection;bool worldReady=false,projectionReady=false;edgeSmooth::Cache smooth;MDagPath path;int vertices=0,edges=0;std::vector<std::array<int,2>> pairs;};
 class MarkedEdges:public MUserRenderOperation {
-    std::vector<MarkedMesh> meshes;
+    std::vector<MarkedMesh> meshes;MFloatPointArray batchPoints;MUintArray batchIndices;size_t batchSignature=0;
 public:
     Targets* targets=nullptr;MCameraOverride camera;
     const MCameraOverride* cameraOverride()override{return &camera;}
@@ -122,14 +136,14 @@ public:
     MRenderTarget* const* targetOverrideList(unsigned& count)override{count=2;return targets->final;}
     MStatus execute(const MDrawContext&)override{
         if(!edgesDirty)return MS::kSuccess;
-        meshes.clear();hardCount=creaseCount=0;std::unordered_set<unsigned long long> done;
+        meshes.clear();batchPoints.clear();batchIndices.clear();batchSignature=0;hardCount=creaseCount=0;std::unordered_set<unsigned long long> done;
         for(unsigned i=0;i<selected.length();i++){
             MDagPath path;MObject part;selected.getDagPath(i,path,part);
             auto key=pathKey(path);if(!done.insert(key).second||!path.isValid())continue;
             auto data=selectedData.find(key);if(data==selectedData.end())continue;
             MFnMesh fn(path);MUintArray ids;MDoubleArray weights;std::unordered_set<int> creased;
             if(fn.getCreaseEdges(ids,weights))for(unsigned j=0;j<ids.length();j++)if(weights[j]>0)creased.insert(ids[j]);
-            MarkedMesh mesh;mesh.path=path;mesh.vertices=fn.numVertices();mesh.edges=fn.numEdges();
+            MarkedMesh mesh;mesh.path=path;mesh.stamp=std::make_shared<MeshStamp>();mesh.stamp->callback=MNodeMessage::addNodeDirtyPlugCallback(path.node(),[](MObject&,MPlug&,void* data){static_cast<MeshStamp*>(data)->dirty=true;},mesh.stamp.get());mesh.vertices=fn.numVertices();mesh.edges=fn.numEdges();
             for(MItMeshEdge edge(path);!edge.isDone();edge.next()){
                 bool hard=!edge.isSmooth(),crease=creased.count(edge.index())!=0;
                 if(!(showHard&&hard)&&!(showCrease&&crease))continue;
@@ -150,14 +164,42 @@ public:
         auto projection=context.getMatrix(MFrameContext::kViewProjMtx);auto inverse=projection.inverse();
         draw.beginDrawable(MUIDrawManager::kNonSelectable);draw.setColor(MColor(color[0],color[1],color[2],1));draw.setLineWidth(width);
         draw.setDepthPriority(MRenderItem::sDormantWireDepthPriority);
+        std::vector<MarkedMesh*> smoothMeshes;bool batchDirty=false;size_t signature=1469598103934665603ull;unsigned totalPoints=0;
         for(auto& mesh:meshes){
             if(!mesh.path.isValid()||!mesh.path.isVisible())continue;
             if(scope!="*"){std::string path=mesh.path.fullPathName().asChar();bool allowed=false;for(auto& prefix:prefixes)if(path==prefix||path.rfind(prefix+"|",0)==0)allowed=true;if(!allowed)continue;}
-            MFnMesh fn(mesh.path);fn.syncObject();if(fn.numVertices()!=mesh.vertices||fn.numEdges()!=mesh.edges){edgesDirty=true;continue;}MStatus status;const double* points=fn.getRawDoublePoints(&status);const float* floatPoints=nullptr;
-            if(!status||!points){points=nullptr;floatPoints=fn.getRawPoints(&status);if(!status||!floatPoints)continue;}
-            MMatrix bias;bias[3][2]=-4.0/16777215.0;auto matrix=mesh.path.inclusiveMatrix()*projection*bias*inverse;MPointArray output;
-            for(auto pair:mesh.pairs)for(int vertex:pair){MPoint p=MPoint(points?points[vertex*3]:floatPoints[vertex*3],points?points[vertex*3+1]:floatPoints[vertex*3+1],points?points[vertex*3+2]:floatPoints[vertex*3+2])*matrix;p.cartesianize();output.append(p);}
-            draw.lineList(output,false);
+            mesh.outputDirty=false;int divisions=mesh.smooth.level;bool changed=false;const double* points=nullptr;const float* floatPoints=nullptr;
+            if(mesh.stamp->dirty||divisions<=0){
+                MFnMesh fn(mesh.path);fn.syncObject();if(fn.numVertices()!=mesh.vertices||fn.numEdges()!=mesh.edges){edgesDirty=true;continue;}MStatus status;points=fn.getRawDoublePoints(&status);
+                if(!status||!points){points=nullptr;floatPoints=fn.getRawPoints(&status);if(!status||!floatPoints)continue;}++positionReads;
+                divisions=0;MStatus plugStatus;auto display=fn.findPlug("displaySmoothMesh",true,&plugStatus);if(plugStatus&&display.asInt()!=0)divisions=fn.findPlug("smoothLevel",true).asInt();
+                if(mesh.smooth.level!=divisions){mesh.smooth.build(fn,divisions,mesh.pairs);mesh.worldReady=false;mesh.projectionReady=false;mesh.drawIndices.clear();++smoothBuilds;}
+                changed=divisions&&mesh.smooth.ready&&mesh.smooth.update(fn,points,floatPoints,mesh.vertices);if(changed)++smoothUpdates;
+                mesh.stamp->dirty=false;
+            }
+            if(divisions&&!mesh.smooth.ready)continue;
+            if(divisions){
+                auto world=mesh.path.inclusiveMatrix();bool worldChanged=changed||!mesh.worldReady||world!=mesh.lastWorld;
+                if(worldChanged){mesh.lastWorld=world;mesh.worldReady=true;mesh.world.setLength(mesh.smooth.evaluated.length());for(unsigned i=0;i<mesh.world.length();++i){const auto& p=mesh.smooth.evaluated[i];mesh.world[i]=MPoint(p.x*world[0][0]+p.y*world[1][0]+p.z*world[2][0]+world[3][0],p.x*world[0][1]+p.y*world[1][1]+p.z*world[2][1]+world[3][1],p.x*world[0][2]+p.y*world[1][2]+p.z*world[2][2]+world[3][2]);}}
+                if(!mesh.drawIndices.length())for(auto pair:mesh.smooth.pairs){mesh.drawIndices.append(pair[0]);mesh.drawIndices.append(pair[1]);}
+                if(worldChanged||!mesh.projectionReady||projection!=mesh.lastProjection){
+                    mesh.outputDirty=true;batchDirty=true;mesh.lastProjection=projection;mesh.projectionReady=true;mesh.output.setLength(mesh.world.length());
+                    // Exact clip-space depth bias, without two 4x4 API matrix products per endpoint.
+                    double z=-4.0/16777215.0;
+                    for(unsigned i=0;i<mesh.world.length();++i){const MPoint& p=mesh.world[i];double shift=z*(p.x*projection[0][3]+p.y*projection[1][3]+p.z*projection[2][3]+projection[3][3]);double w=1.+shift*inverse[2][3];mesh.output[i]=MFloatPoint((p.x+shift*inverse[2][0])/w,(p.y+shift*inverse[2][1])/w,(p.z+shift*inverse[2][2])/w);}
+                }
+                smoothMeshes.push_back(&mesh);totalPoints+=mesh.output.length();signature=(signature^pathKey(mesh.path))*1099511628211ull;signature=(signature^mesh.output.length())*1099511628211ull;
+            }else{
+                MMatrix bias;bias[3][2]=-4.0/16777215.0;auto matrix=mesh.path.inclusiveMatrix()*projection*bias*inverse;MPointArray output;
+                for(auto pair:mesh.pairs)for(int vertex:pair){MPoint p=MPoint(points?points[vertex*3]:floatPoints[vertex*3],points?points[vertex*3+1]:floatPoints[vertex*3+1],points?points[vertex*3+2]:floatPoints[vertex*3+2])*matrix;p.cartesianize();output.append(p);}
+                draw.lineList(output,false);
+            }
+        }
+        if(!smoothMeshes.empty()){
+            bool membershipChanged=signature!=batchSignature||batchPoints.length()!=totalPoints;
+            if(membershipChanged){batchIndices.clear();unsigned offset=0;for(auto mesh:smoothMeshes){mesh->batchOffset=offset;for(unsigned i=0;i<mesh->drawIndices.length();++i)batchIndices.append(offset+mesh->drawIndices[i]);offset+=mesh->output.length();}batchSignature=signature;}
+            if(batchDirty||membershipChanged){batchPoints.setLength(totalPoints);for(auto mesh:smoothMeshes)if(membershipChanged||mesh->outputDirty)for(unsigned i=0;i<mesh->output.length();++i)batchPoints[mesh->batchOffset+i]=mesh->output[i];}
+            draw.mesh(MUIDrawManager::kLines,batchPoints,nullptr,nullptr,&batchIndices);
         }
         draw.endDrawable();
     }
@@ -230,5 +272,10 @@ public:
     }
 };
 static Fast* instance=nullptr;
-MStatus initializePlugin(MObject object){MFnPlugin plugin(object,"ReaPencil independent project","0.8.13","Any");auto renderer=MRenderer::theRenderer();if(!renderer)return MS::kFailure;instance=new Fast();return renderer->registerOverride(instance);}
+MStatus initializePlugin(MObject object){MFnPlugin plugin(object,"ReaPencil independent project","0.8.43","Any");auto renderer=MRenderer::theRenderer();if(!renderer)return MS::kFailure;instance=new Fast();return renderer->registerOverride(instance);}
 MStatus uninitializePlugin(MObject){auto renderer=MRenderer::theRenderer();if(renderer&&instance)renderer->deregisterOverride(instance);delete instance;instance=nullptr;return MS::kSuccess;}
+
+extern "C" __declspec(dllexport) int rp_fast_smooth_probe(const char* name,int level,double* output,int capacity){
+ MSelectionList sel;if(!sel.add(name))return -1;MDagPath path;sel.getDagPath(0,path);MFnMesh fn(path);std::vector<std::array<int,2>> pairs;for(MItMeshEdge e(path);!e.isDone();e.next())if(!e.isSmooth())pairs.push_back({e.index(0),e.index(1)});edgeSmooth::Cache cache;if(!cache.build(fn,level,pairs))return -2;MStatus status;const double* d=fn.getRawDoublePoints(&status);const float* f=nullptr;if(!status||!d){d=nullptr;f=fn.getRawPoints(&status);}cache.update(fn,d,f,fn.numVertices());int n=int(cache.pairs.size());if(capacity>=n)for(int i=0;i<n;++i)for(int j=0;j<2;++j){auto p=cache.evaluated[cache.pairs[i][j]];output[i*6+j*3]=p.x;output[i*6+j*3+1]=p.y;output[i*6+j*3+2]=p.z;}return n;
+}
+

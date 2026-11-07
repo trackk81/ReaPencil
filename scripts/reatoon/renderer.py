@@ -23,16 +23,17 @@ from .intersections import find_intersections, find_render_intersections
 
 DEFAULTS = dict(width=640, height=480, supersample=2, background=[1, 1, 1],
                 line_width=1.5, line_color=[0.04, 0.04, 0.07], hidden_lines=False,
+                feature_brushes={}, hidden_style={},
                 hidden_color=[0.5, 0.5, 0.6], outline=True, open_edges=True,
-                crease=True, crease_angle=40.0, material_boundaries=True,
+                crease=True, crease_angle=40.0, crease_angle_max=180.0, material_boundaries=True,
                 selected_edges=True, wireframe=False, hard_edges=True,
                 intersections=True, self_intersections=False, intersection_tolerance=1e-7,
                 depth_bias=0.002, distance_reduction=0.0, width_variation=0.0,
                 taper=0.0, dash_length=0.0, dash_gap=-1.0, relative_line_size=False,
                 connect_collinear_dashes=False,
-                line_opacity=1.0,
+                line_opacity=1.0, blend_mode=0, brush_key="",
                 brush_size_scale=1.0,
-                width_profile=[], alpha_profile=[], profile_direction=-30.,
+                width_profile=[], alpha_profile=[], alpha_depth_reduction=[], width_depth_reduction=[], alpha_reduction_origin=[], width_reduction_origin=[], profile_direction=-30.,
                 profile_split_angle=90., profile_loop_direction=0, pencil_profile_width=True,
                 seed=1, line_sets={},edge_prepare_workers=4)
 
@@ -392,7 +393,11 @@ def classify_edge_indices(prepared, camera, settings):
             silhouettes = np.logical_or.reduceat(facing, p['starts']) != np.logical_and.reduceat(facing, p['starts'])
         flags[multi & silhouettes] |= 4
     if settings.get('crease'):
-        flags[multi & (p['min_dot'] < math.cos(math.radians(float(settings['crease_angle']))) - 1e-8)] |= 8
+        angle_mask=multi & (p['min_dot'] < math.cos(math.radians(float(settings['crease_angle']))) - 1e-8)
+        maximum=float(settings.get('crease_angle_max',180.))
+        if maximum<180.:
+            angle_mask &= p['min_dot'] >= math.cos(math.radians(maximum)) - 1e-8
+        flags[angle_mask] |= 8
     if settings.get('material_boundaries'):
         flags[multi & p['material']] |= 16
     if settings.get('hard_edges'):
@@ -421,8 +426,19 @@ def line_style_passes(scene, settings=None):
     cfg.update(settings or {})
     table = dict(scene.get("line_sets", {}))
     table.update(cfg.get("line_sets", {}))
-    def resolve(overrides):
+    def resolve_basic(overrides):
         style = dict(cfg, **overrides)
+        if style.get('alpha_depth_reduction'):
+            from .depth_reduction import validate
+            style['alpha_depth_reduction']=validate(style['alpha_depth_reduction'])
+        if style.get('width_depth_reduction'):
+            from .depth_reduction import validate
+            style['width_depth_reduction']=validate(style['width_depth_reduction'])
+        for channel in ('alpha','width'):
+            from .depth_reduction import validate_origin
+            key=channel+'_reduction_origin'
+            style[key]=validate_origin(style.get(key,[]))
+            if style[key] and not style.get(channel+'_depth_reduction'):raise ValueError('Reference origin requires reduction parameters')
         scale=float(style.get('brush_size_scale',1.))
         if not math.isfinite(scale) or not 0<=scale<=1:
             raise ValueError('Brush width multiplier must be finite and in 0..1')
@@ -436,12 +452,21 @@ def line_style_passes(scene, settings=None):
                 style[key] *= scale
             if style.get('dash_gap', -1.) >= 0:
                 style['dash_gap'] *= scale
-        if style.get('pencil_profile_width',False) and (style.get('width_profile') or style.get('alpha_profile')):
+        if (style.get('pencil_profile_width',False) and (style.get('width_profile') or style.get('alpha_profile'))) or style.get('width_depth_reduction'):
             style['_profile_source_width']=float(style['line_width'])
             style['_profile_width_scale']=brush_scale
             nominal=style['line_width']/brush_scale if brush_scale>0 else 0.
             style['line_width']=2.*style['line_width'] if nominal<2. else style['line_width']+2.*brush_scale
         return style
+    def resolve(overrides):
+        raw=dict(cfg,**overrides)
+        if raw.get('alpha_depth_reduction'):
+            from .depth_reduction import validate
+            raw['alpha_depth_reduction']=validate(raw['alpha_depth_reduction'])
+        if cfg.get('_cpu_brush_channels') and (raw.get('feature_brushes') or raw.get('hidden_style') or raw.get('blend_mode',0)!=0 or raw.get('hidden_lines') and (raw.get('line_opacity',1.)!=1. or raw.get('width_profile') or raw.get('alpha_profile'))):
+            from .brush_channels import prepare
+            return prepare(raw,resolve_basic)
+        return resolve_basic(overrides)
     meshes = scene.get("meshes", [])
     if not any("line_passes" in mesh for mesh in meshes):
         styles = [resolve(table.get(mesh.get("line_set", ""), {})) for mesh in meshes]
@@ -553,30 +578,39 @@ def world_line_segments(scene, settings=None, intersections=None, prepared_edges
                     classifier = dict(prepared, selected=selected_mask)
                 if triangle_outlines is not None:
                     classifier=dict(classifier,outline_mask=mask)
-                indices, flags = classify_edge_indices(classifier, camera, local)
-                chosen=indices[edge_styles[indices] == style_id]
-                if packed:
-                    segments.add_edges(mesh,index,prepared,chosen,flags,local,item['line'])
+                parent_style=local
+                if '_brush_channels' in local:
+                    from .brush_channels import edge_groups
+                    routes=edge_groups(classifier,camera,local,classify_edge_indices)
                 else:
-                    for edge in chosen:
-                        pair = prepared['pairs'][edge]
-                        features = [name for bit, name in enumerate(EDGE_FEATURES) if int(flags[edge]) & (1 << bit)]
-                        segments.append(dict(a=list(mesh['vertices'][pair[0]]), b=list(mesh['vertices'][pair[1]]),
-                                             features=features, mesh_index=index, mesh=mesh.get('name', 'mesh'),
-                                             settings=local, line=item['line']))
-                        if local.get('connect_collinear_dashes',False) or local.get('width_profile') or local.get('alpha_profile'):
-                            segments[-1]['_vertex_ids']=tuple(int(v) for v in pair)
-                if triangle_outlines is not None and local.get('outline'):
-                    chosen=np.flatnonzero(diagonal_styles==style_id)
+                    ids,flags=classify_edge_indices(classifier,camera,local)
+                    routes=[(ids,flags,local)]
+                for indices,flags,local in routes:
+                    chosen=indices[edge_styles[indices] == style_id]
                     if packed:
-                        segments.add_edges(mesh,index,dict(vertices=prepared['vertices'],pairs=diagonal_pairs),
-                            chosen,np.full(len(diagonal_pairs),4,np.uint8),local,item['line'])
+                        segments.add_edges(mesh,index,prepared,chosen,flags,local,item['line'])
                     else:
-                        for pair in diagonal_pairs[chosen]:
-                            segments.append(dict(a=list(mesh['vertices'][pair[0]]),b=list(mesh['vertices'][pair[1]]),
-                                features=['outline'],mesh_index=index,mesh=mesh.get('name','mesh'),settings=local,line=item['line']))
-                            if local.get('connect_collinear_dashes',False) or local.get('width_profile') or local.get('alpha_profile'):
+                        for edge in chosen:
+                            pair = prepared['pairs'][edge]
+                            features = [name for bit, name in enumerate(EDGE_FEATURES) if int(flags[edge]) & (1 << bit)]
+                            segments.append(dict(a=list(mesh['vertices'][pair[0]]), b=list(mesh['vertices'][pair[1]]),
+                                                 features=features, mesh_index=index, mesh=mesh.get('name', 'mesh'),
+                                                 settings=local, line=item['line']))
+                            if local.get('connect_collinear_dashes',False) or local.get('width_profile') or local.get('alpha_profile') or local.get('width_depth_reduction'):
                                 segments[-1]['_vertex_ids']=tuple(int(v) for v in pair)
+                from .brush_channels import feature_styles
+                for local in feature_styles(parent_style,'outline'):
+                    if triangle_outlines is not None and local.get('outline'):
+                        chosen=np.flatnonzero(diagonal_styles==style_id)
+                        if packed:
+                            segments.add_edges(mesh,index,dict(vertices=prepared['vertices'],pairs=diagonal_pairs),
+                                chosen,np.full(len(diagonal_pairs),4,np.uint8),local,item['line'])
+                        else:
+                            for pair in diagonal_pairs[chosen]:
+                                segments.append(dict(a=list(mesh['vertices'][pair[0]]),b=list(mesh['vertices'][pair[1]]),
+                                    features=['outline'],mesh_index=index,mesh=mesh.get('name','mesh'),settings=local,line=item['line']))
+                                if local.get('connect_collinear_dashes',False) or local.get('width_profile') or local.get('alpha_profile') or local.get('width_depth_reduction'):
+                                    segments[-1]['_vertex_ids']=tuple(int(v) for v in pair)
         if packed and hasattr(intersections,'batches'):
             sentinel=len(styles)
             for first,second,rows in intersections.batches:
@@ -599,7 +633,7 @@ def world_line_segments(scene, settings=None, intersections=None, prepared_edges
                 cuts=np.r_[0,np.flatnonzero((chosen[1:]!=chosen[:-1])|(owners[1:]!=owners[:-1]))+1,len(rows)]
                 for lo,hi in zip(cuts[:-1],cuts[1:]):
                     sid=int(chosen[lo]);index=int(owners[lo])
-                    if sid<sentinel:segments.add_intersections(meshes[index],index,rows[lo:hi],styles[sid],item['line'])
+                    if sid<sentinel:segments.add_intersections(meshes[index],index,rows[lo:hi],styles[sid],item['line'],first==second)
             continue
         for intersection in intersections:
             first, second = intersection["mesh_indices"]
@@ -619,9 +653,11 @@ def world_line_segments(scene, settings=None, intersections=None, prepared_edges
             if not enabled:
                 continue
             style_id, index = min(enabled)
-            segments.append(dict(a=intersection["a"], b=intersection["b"], features=["intersection"],
-                                 mesh_index=index, mesh=meshes[index].get("name", "mesh"),
-                                 settings=styles[style_id], mesh_indices=intersection["mesh_indices"], line=item["line"]))
+            from .brush_channels import feature_styles
+            for child in feature_styles(styles[style_id],'intersection',first==second):
+                segments.append(dict(a=intersection["a"], b=intersection["b"], features=["intersection"],
+                                     mesh_index=index, mesh=meshes[index].get("name", "mesh"),
+                                     settings=child, mesh_indices=intersection["mesh_indices"], line=item["line"]))
     return dict(segments=segments, warnings=warnings, intersection_diagnostics=diagnostic)
 
 
@@ -723,21 +759,26 @@ def render(scene, output_prefix, settings=None, depth_prepass=None):
     started=time.perf_counter()
     cfg = dict(DEFAULTS)
     cfg.update(settings or {})
+    cfg["_cpu_brush_channels"]=True
     line_only=bool(cfg.get('line_only',False))
     styles=line_style_passes(scene,cfg)
     all_styles=[s for item in styles for s in item['styles']]
+    from . import brush_effects
+    effect_layers=brush_effects.required(all_styles)
+    complex_profiles=any(s.get('width_profile') or s.get('alpha_profile') or s.get('line_opacity',1.)!=1. for parent in all_styles for s in brush_effects.leaves(parent))
+    if complex_profiles and (scene.get('merge_groups') or any(e.get('active',True) and e.get('kind','line') in ('line','eps') for e in scene.get('render_elements',[]))):effect_layers=True
     opacities=[float(s.get('line_opacity',1.)) for s in all_styles]
     if any(not math.isfinite(v) or not 0<=v<=1 for v in opacities):
         raise ValueError('Brush opacity must be finite and in 0..1')
     frame_opacity=1.
-    if any(v!=1. for v in opacities):
+    if not effect_layers and any(v!=1. for v in opacities):
         if len(all_styles)!=1 or all_styles[0].get('hidden_lines',False):
             raise ValueError('Brush opacity currently requires one visible-only line style; multiple/hidden brushes are not implemented')
         frame_opacity=opacities[0]
-    profiles_active=any(s.get('width_profile') or s.get('alpha_profile') for s in all_styles)
+    profiles_active=any(s.get('width_profile') or s.get('alpha_profile') or s.get('alpha_depth_reduction') or s.get('width_depth_reduction') for s in all_styles)
     variable_alpha=any(s.get('alpha_profile') for s in all_styles)
     profile_coverage_union=variable_alpha or (profiles_active and len(all_styles)==1 and all_styles[0].get('pencil_profile_width',False) and not all_styles[0].get('hidden_lines',False))
-    if variable_alpha and (len(all_styles)!=1 or all_styles[0].get('hidden_lines',False)):
+    if not effect_layers and variable_alpha and (len(all_styles)!=1 or all_styles[0].get('hidden_lines',False)):
         raise ValueError('Varying alpha requires one visible-only line style')
     if profiles_active:
         from .brush_profiles import profile_table
@@ -784,6 +825,7 @@ def render(scene, output_prefix, settings=None, depth_prepass=None):
             warnings.append(str(error)+'; using Python CPU stroke reference')
     from . import render_elements
     elements, element_results = [], []
+    effect_element_layers = {}
     for record in scene.get("render_elements", []):
         element = dict(render_elements.validate({k: v for k, v in record.items() if k != "name"}), name=record.get("name", "element"))
         if not element["active"]:
@@ -795,7 +837,16 @@ def render(scene, output_prefix, settings=None, depth_prepass=None):
         else:
             if len(elements) >= 32 or (len(elements) + 1) * h * w * 2 > 67_108_864:
                 raise ValueError("Render element image budget exceeded; reduce active elements or resolution")
-            elements.append((element, np.zeros((2, h, w, 4), dtype=np.float32) if element["kind"] == "line" else None))
+            if effect_layers:
+                key=(element['output_element'],element['visible_lines'],element['hidden_lines'],
+                     tuple(sorted(element['edge_types'])),tuple(sorted(element['lineset_ids'])),
+                     (element['z_min'],element['z_max']) if element['output_element']=='depth' else None)
+                if key not in effect_element_layers:
+                    effect_element_layers[key]=np.zeros((1,h,w,4),dtype=np.float32)
+                layer=effect_element_layers[key]
+            else:
+                layer=np.zeros((2,h,w,4),dtype=np.float32) if element['kind']=='line' else None
+            elements.append((element,layer))
     mesh_groups = np.full(len(meshes), -1, dtype=np.int32)
     for group in scene.get("merge_groups", []):
         mesh_groups[group["mesh_indices"]] = int(group["id"])
@@ -886,8 +937,9 @@ def render(scene, output_prefix, settings=None, depth_prepass=None):
         group_image = np.where(mesh_owners >= 0, mesh_groups[np.maximum(0, mesh_owners)], -1)
     vectors = []
     masks=None;cull_stats=None
-    if (line_only and cfg.get('visibility_cull',True) and not elements and
-        not any(s.get('hidden_lines',False) for s in all_styles) and
+    from .brush_channels import needs_hidden_intersections
+    if (line_only and cfg.get('visibility_cull',True) and (not elements or effect_layers) and
+        not any(needs_hidden_intersections(s) for s in all_styles) and
         all('triangles' in m and 'triangle_faces' in m for m in meshes)):
         try:
             from .cpu_triangle_visibility import visibility_masks
@@ -898,7 +950,7 @@ def render(scene, output_prefix, settings=None, depth_prepass=None):
         except ImportError as error:
             warnings.append('Triangle visibility accelerator unavailable: %s; using full intersection query' % error)
     refined=(line_only and cfg.get('exact_visibility',False) and cfg.get('compiled_segments',True)
-             and not elements and group_image is None and
+             and (not elements or effect_layers) and (group_image is None or effect_layers) and
              not any(s.get('hidden_lines',False) or any(float(s.get(k,0))!=0 for k in
                  ('dash_length','distance_reduction','width_variation','taper')) for s in all_styles))
     prepared_intersections=[] if refined else None
@@ -923,7 +975,14 @@ def render(scene, output_prefix, settings=None, depth_prepass=None):
     stats["intersection_diagnostics"] = line_data["intersection_diagnostics"]
     geometry_finished=time.perf_counter()
     remaining_segments=line_data['segments']
-    if line_only and cfg.get('compiled_segments',True):
+    effect_beauty=None
+    if effect_layers:
+        if not line_only:
+            raise ValueError('Independent brush effects currently require CPU line-only output')
+        effect_beauty,batch=brush_effects.render(remaining_segments,camera,depth,depth_planes,visible,hidden,ss,visibility,compiled=cfg.get('compiled_segments',True),group_image=group_image,mesh_groups=mesh_groups,elements=elements)
+        stats.update(batch);remaining_segments=[]
+        warnings.append('Mixed-effect SVG/EPS use full-resolution flattened CPU images, not editable vector strokes. EPS has a white matte; filtered PNG elements retain coverage alpha.')
+    if not effect_layers and line_only and cfg.get('compiled_segments',True):
         try:
             from .cpu_segments import render_segments
             batch=render_segments(remaining_segments,camera,depth,depth_planes,visible,hidden,ss,group_image,elements,
@@ -942,7 +1001,7 @@ def render(scene, output_prefix, settings=None, depth_prepass=None):
         count=len(remaining_segments)
         remaining_segments=connect_collinear(remaining_segments)
         stats['collinear_connections']=count-len(remaining_segments)
-    if profiles_active:
+    if profiles_active and not effect_layers:
         if not elements and group_image is None and cfg.get('compiled_segments',True) and hasattr(remaining_segments,'parts'):
             from .cpu_brush import render_packed
             batch=render_packed(remaining_segments,camera,depth,depth_planes,visible,ss,visibility,union_coverage=profile_coverage_union)
@@ -955,7 +1014,7 @@ def render(scene, output_prefix, settings=None, depth_prepass=None):
                 batch=profile_segments(remaining_segments,camera,depth,depth_planes,visible,ss,visibility,union_coverage=profile_coverage_union)
                 if batch is not None:stats.update(batch);remaining_segments=[]
         stats['profile_backend']='native-cpu-adaptive-bezier'
-        warnings.append('Curve raster: projected-angle corner links and clockwise/anticlockwise loops are supported. Rectangle seams are replay-tested; irregular/subdivided loop origin and exact direction ties remain approximate. Branches and intersection pieces split; SVG/EPS omitted.')
+        warnings.append('Curve raster: projected-angle corner links and clockwise/anticlockwise loops are supported. Rectangle seams are replay-tested; irregular/subdivided loop origin and exact direction ties remain approximate. Branches and intersection pieces split; SVG/EPS use full-resolution raster composites.')
     for edge_index, segment in enumerate(remaining_segments):
         mesh_index = segment["mesh_index"]
         local, kinds = segment["settings"], segment["features"]
@@ -1017,7 +1076,7 @@ def render(scene, output_prefix, settings=None, depth_prepass=None):
                 both.append(match)
             merged = both[0] & both[1]
             stats["merge_suppressed_samples"] = stats.get("merge_suppressed_samples", 0) + int(np.count_nonzero(merged))
-        if local.get('width_profile') or local.get('alpha_profile'):
+        if local.get('width_profile') or local.get('alpha_profile') or local.get('width_depth_reduction'):
             from .profile_strokes import draw,maximum_over
             u=segment.get('_profile_u')
             if u is None:
@@ -1036,6 +1095,7 @@ def render(scene, output_prefix, settings=None, depth_prepass=None):
                 if gap<0:allowed&=(np.floor(mid*length/dash).astype(np.int64)%2)==0
                 elif gap>0:allowed&=(mid*length)%(dash+gap*ss)<dash
             for vis in (True,False):
+                if local.get('_visibility_mode',0) and vis!=(local['_visibility_mode']>0):continue
                 if not vis and not local['hidden_lines']:continue
                 mask=allowed&(front==vis)
                 color=_color(local['line_color'] if vis else local['hidden_color'])
@@ -1062,6 +1122,7 @@ def render(scene, output_prefix, settings=None, depth_prepass=None):
             sample_kinds = [feature for feature in kinds if not (merged[k] and feature in ("outline", "open"))]
             if not sample_kinds:
                 continue
+            if local.get("_visibility_mode",0) and bool(is_visible)!=(local["_visibility_mode"]>0):continue
             if not is_visible and not local["hidden_lines"]:
                 continue
             dash = float(local.get("dash_length", 0)) * ss
@@ -1119,7 +1180,8 @@ def render(scene, output_prefix, settings=None, depth_prepass=None):
     # Applying it to every capsule/edge would darken joins and crossings.
     if frame_opacity!=1.:
         visible*=frame_opacity
-    if line_only:
+    if effect_beauty is not None:beauty=effect_beauty
+    elif line_only:
         if not any(s.get('hidden_lines',False) for s in all_styles):beauty=visible
         else:
             beauty=hidden.copy()
@@ -1134,11 +1196,8 @@ def render(scene, output_prefix, settings=None, depth_prepass=None):
     paths = {k: str(prefix.parent / (prefix.name + "_" + k + ext)) for k, ext in
              (("beauty", ".png"), ("visible", ".png"), ("hidden", ".png"), ("depth", ".png"),
               ("lines", ".svg"), ("eps", ".eps"), ("manifest", ".json")) if auxiliary or k in ('beauty','manifest')}
-    if profiles_active:
-        paths.pop('eps',None);paths.pop('lines',None)
-    if frame_opacity!=1. and 'eps' in paths:
-        del paths['eps']
-        warnings.append('EPS output skipped: translucent brush output requires an alpha-capable format; use PNG or SVG')
+    raster_vectors=bool(profiles_active or effect_layers)
+    raster_eps=bool(raster_vectors or frame_opacity!=1.)
     _png(Path(paths["beauty"]), _white_matte_rgba(_down(beauty,ss)) if line_only else _down(beauty, ss))
     if auxiliary:
         depth_img = np.where(np.isfinite(depth), np.clip(1 - (depth - camera["near"]) / (camera["far"] - camera["near"]), 0, 1), 0)
@@ -1165,10 +1224,34 @@ def render(scene, output_prefix, settings=None, depth_prepass=None):
     svg.append("</svg>")
     eps.extend(["showpage", "%%EOF"])
     if auxiliary:
-        if 'lines' in paths:Path(paths['lines']).write_text('\n'.join(svg), encoding='utf-8')
-        if 'eps' in paths:Path(paths['eps']).write_text('\n'.join(eps), encoding='ascii')
+        if 'lines' in paths and not raster_vectors:Path(paths['lines']).write_text('\n'.join(svg), encoding='utf-8')
+        if 'eps' in paths and not raster_eps:Path(paths['eps']).write_text('\n'.join(eps), encoding='ascii')
+    if auxiliary and (raster_vectors or raster_eps):
+        from . import composite_export
+        rgb=composite_export.rgb8(_down(beauty,ss));stats['vector_representation']={}
+        if raster_vectors and 'lines' in paths:
+            composite_export.svg(paths['lines'],rgb);stats['vector_representation']['svg']='embedded-raster-composite-white-matte'
+        if raster_eps and 'eps' in paths:
+            composite_export.eps(paths['eps'],rgb);stats['vector_representation']['eps']='flattened-raster-composite-white-matte'
+        warnings.append('SVG/EPS mixed-effect raster composites preserve output resolution and white-matte appearance; PNG retains coverage alpha.')
+    downsampled_elements={}
     for element, layer in elements:
         path = render_elements.output_path(element, prefix, scene.get("scene_name", ""))
+        if effect_layers:
+            from . import composite_export
+            if id(layer) not in downsampled_elements:downsampled_elements[id(layer)]=_down(layer[0],ss)
+            data=downsampled_elements[id(layer)]
+            if element['bg_color_enable']:
+                data=data.copy();data[...,:3]+=np.asarray(element['bg_color'])*(1-data[...,3,None])
+                # Pencil color elements keep coverage alpha even with a background.
+                if element['kind']=='eps':data[...,3]=1
+            if element['kind']=='eps':
+                composite_export.eps(path,composite_export.rgb8(data));encoding='flattened-raster-composite-white-matte'
+                warnings.append(element['name']+': EPS contains an embedded CPU raster composite; editable Illustrator metadata is not implemented.')
+            else:
+                _png(path,data);encoding='premultiplied-rgba-black'
+            element_results.append(dict(name=element['name'],status='written',kind=element['kind'],path=str(path),representation=encoding))
+            continue
         if layer is not None:
             _over(layer[0], layer[1])
             layer = layer[0]

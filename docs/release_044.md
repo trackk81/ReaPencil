@@ -1,0 +1,1 @@
+Fast Preview authored edges now follow Smooth Mesh Preview. Tighter uncreased-stencil supports reduce legacy basis preparation; float indexed batches and mesh-dirty notifications avoid camera-only position polling. Advanced Settings edits actual modern Line Sets. CPU renderer unchanged from installed042. Local review only.

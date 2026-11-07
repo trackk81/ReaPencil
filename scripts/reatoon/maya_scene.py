@@ -13,15 +13,16 @@ DEFAULT_SETTINGS = {
     "enabled_smooth_mesh": False,
     "relative_line_size": False,
     "connect_collinear_dashes": False,
-    "line_opacity": 1.0,
+    "line_opacity": 1.0, "blend_mode": 0, "brush_key": "",
     "brush_size_scale": 1.0,
-    "width_profile": [], "alpha_profile": [], "profile_direction": -30.0,
+    "width_profile": [], "alpha_profile": [], "alpha_depth_reduction": [], "width_depth_reduction": [], "alpha_reduction_origin": [], "width_reduction_origin": [], "profile_direction": -30.0,
     "profile_split_angle": 90.0, "profile_loop_direction": 0, "pencil_profile_width": True,
     "width": 640, "height": 480, "supersample": 2,
     "background": [1.0, 1.0, 1.0], "line_width": 1.5,
     "line_color": [0.05, 0.05, 0.08], "hidden_lines": False,
+    "feature_brushes": {}, "hidden_style": {},
     "hidden_color": [0.5, 0.5, 0.6], "outline": True, "open_edges": True,
-    "crease": True, "crease_angle": 40.0, "material_boundaries": True,
+    "crease": True, "crease_angle": 40.0, "crease_angle_max": 180.0, "material_boundaries": True,
     "selected_edges": True, "wireframe": False, "hard_edges": True,
     "intersections": True, "self_intersections": False,
     "merge_groups": True, "lineset_id": 1,
@@ -46,8 +47,8 @@ def _tag(node, kind):
     cmds.setAttr(node + ".reaToonKind", kind, type="string")
 
 
-def _tagged(kind, node_type=None):
-    nodes = cmds.ls(type=node_type) if node_type else cmds.ls("*.reaToonKind", objectsOnly=True)
+def _tagged(kind, node_type=None, include_namespaces=True):
+    nodes = cmds.ls(type=node_type) if node_type else cmds.ls(":*.reaToonKind", objectsOnly=True, recursive=include_namespaces)
     return [n for n in (nodes or [])
             if cmds.attributeQuery("reaToonKind", node=n, exists=True)
             and cmds.getAttr(n + ".reaToonKind") == kind]
@@ -69,7 +70,7 @@ def validate_settings(values, partial=False):
         raise ValueError("Settings must be an object.")
     result = {} if partial else dict(DEFAULT_SETTINGS)
     ranges = {"width": (16, 4096), "height": (16, 4096), "supersample": (1, 4),
-              "profile_split_angle": (0,180), "profile_loop_direction": (0,1), "profile_direction": (-360,360), "line_width": (0.1, 64), "line_opacity": (0, 1), "brush_size_scale": (0, 1), "crease_angle": (0, 180),
+              "profile_split_angle": (0,180), "profile_loop_direction": (0,1), "profile_direction": (-360,360), "line_width": (0.1, 64), "line_opacity": (0, 1), "blend_mode": (0,15), "brush_size_scale": (0, 1), "crease_angle": (0, 180), "crease_angle_max": (0, 180),
               "intersection_tolerance": (1e-12, 0.01),
               "depth_bias": (0, 1), "distance_reduction": (0, 1000),
               "width_variation": (0, 1), "taper": (0, 1),
@@ -78,9 +79,20 @@ def validate_settings(values, partial=False):
         if key not in DEFAULT_SETTINGS:
             raise ValueError("Unknown setting: " + str(key))
         default = DEFAULT_SETTINGS[key]
-        if key in ("width_profile","alpha_profile"):
+        if key in ("feature_brushes","hidden_style"):
+            from .brush_channels import validate_nested
+            value=validate_nested(value,validate_settings,hidden=key=="hidden_style")
+        elif key in ('alpha_reduction_origin','width_reduction_origin'):
+            from .depth_reduction import validate_origin
+            value=validate_origin(value)
+        elif key in ('alpha_depth_reduction','width_depth_reduction'):
+            from .depth_reduction import validate
+            value=validate(value)
+        elif key in ("width_profile","alpha_profile"):
             from .brush_profiles import validate_profile,profile_table
             value=validate_profile(value);profile_table(value)
+        elif key=="brush_key":
+            if not isinstance(value,str) or len(value)>256 or any(c in value for c in "\r\n"):raise ValueError("Invalid brush identity")
         elif isinstance(default, bool):
             if not isinstance(value, bool):
                 raise ValueError(key + " must be boolean")
@@ -108,7 +120,10 @@ def validate_settings(values, partial=False):
 
 
 def settings_node(create=False):
-    nodes = _tagged("settings")
+    nodes = _tagged("settings", include_namespaces=False)
+    if not nodes:nodes = _tagged("settings")
+    roots = [node for node in nodes if ":" not in node]
+    nodes = roots or nodes
     canonical = [node for node in nodes if cmds.nodeType(node) == "revToonRenderSettings"]
     if canonical:
         if not cmds.attributeQuery("enabledSmoothMesh", node=canonical[0], exists=True):
@@ -329,7 +344,7 @@ def _line_membership(path, line_sets):
     return chosen, edges
 
 
-def export_scene(camera=None, settings=None, camera_override=None, include_normals=True, geometry_purpose="render", include_materials=True, as_arrays=False, mesh_filter=None, geometry_cache=None, mesh_ready=None):
+def export_scene(camera=None, settings=None, camera_override=None, include_normals=True, geometry_purpose="render", include_materials=True, as_arrays=False, mesh_filter=None, geometry_cache=None, mesh_ready=None, alpha_configuration=None):
     from . import line_graph
     from . import smooth_geometry
     from . import alpha_boundary
@@ -367,7 +382,7 @@ def export_scene(camera=None, settings=None, camera_override=None, include_norma
         if cmds.getAttr(name + ".intermediateObject") or not path.isVisible():
             continue
         source_fn = om.MFnMesh(path)
-        alpha_config=alpha_boundary.configuration(name)
+        alpha_config=(alpha_configuration or alpha_boundary.configuration)(name)
         shading_engines, ids = source_fn.getConnectedShaders(path.instanceNumber())
         chosen, selected = _line_membership(path, line_sets)
         passes = None

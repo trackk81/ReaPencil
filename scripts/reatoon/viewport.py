@@ -194,8 +194,16 @@ def _watch_scene():
     alpha_names=set()
     from . import alpha_boundary
     for mesh in cmds.ls(type='mesh',long=True) or []:
-        if not cmds.attributeQuery(alpha_boundary.ATTRIBUTE,node=mesh,exists=True):continue
-        for source in alpha_boundary.material_sources(mesh).values():
+        from . import viewport_alpha
+        if cmds.getAttr(mesh+'.intermediateObject'):continue
+        if viewport_alpha.enabled():
+            try:alpha_names.update(viewport_alpha.dependencies(mesh))
+            except RuntimeError:pass
+            continue
+        elif not cmds.attributeQuery(alpha_boundary.ATTRIBUTE,node=mesh,exists=True):continue
+        try:sources=alpha_boundary.material_sources(mesh)
+        except (ValueError,RuntimeError):sources={}
+        for source in sources.values():
             alpha_names.update((source['file_node'],source['shader']))
             alpha_names.update(cmds.listConnections(source['file_node'],source=True,destination=False,type='place2dTexture') or [])
     names.update(alpha_names)
@@ -295,8 +303,9 @@ def _snapshot_for(camera_path, settings):
         # VP2 owns projection and supports shifted/asymmetric film gates.
         # Only camera position/direction are needed for edge classification.
         started = time.perf_counter()
+        from . import viewport_alpha
         snapshot = maya_scene.export_scene(camera_path.fullPathName(), settings,
-                                           camera_override=_camera_data(camera_path, 1.0), include_normals=False)
+                                           camera_override=_camera_data(camera_path, 1.0), include_normals=False,alpha_configuration=viewport_alpha.configuration)
         estimated = sum(len(m["vertices"]) * 176 + len(m.get("triangles", [])) * 192
                         + sum(64 + 36 * len(face) for face in m["faces"])
                         + len(m.get("hard_edges", [])) * 144 for m in snapshot["meshes"])
@@ -471,7 +480,8 @@ def build_draw_data(camera_path, old_data=None, aspect=1.0, clip=None):
                     reason='empty_line_graph',evaluated_frame=float(cmds.currentTime(query=True)))
                 _last_report=dict(data.report)
                 return data
-            settings=maya_scene.load_settings()
+            from . import preview_settings
+            settings=preview_settings.load()
             camera=_camera_data(camera_path,aspect)
             if _view_mesh_filter is not None:camera['_viewport_mesh_filter']=_view_mesh_filter
             if clip is not None:camera['viewport_clip']=clip
@@ -498,9 +508,10 @@ def build_draw_data(camera_path, old_data=None, aspect=1.0, clip=None):
         _last_report=dict(data.report)
         return data
     try:
-        settings = maya_scene.load_settings()
+        from . import preview_settings
+        settings = preview_settings.load()
         snapshot = _snapshot_for(camera_path, settings)
-        scene = dict(snapshot)
+        scene = preview_settings.filter_scene(dict(snapshot))
         scene["camera"] = _camera_data(camera_path, aspect)
         values = dict(settings, line_sets=scene.get("line_sets", {}))
         cache_key = (_snapshot_generation, json.dumps(values, sort_keys=True),

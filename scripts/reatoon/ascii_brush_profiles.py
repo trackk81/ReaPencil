@@ -1,4 +1,4 @@
-"""Read only numeric brush-control arrays lost by Maya's unknown ASCII loader.
+"""Read numeric brush/reduction arrays lost by Maya's unknown ASCII loader.
 
 No MEL evaluation, scene mutation or script execution. Records are matched by
 original node UUID, and only exact finite seven-number control rows are admitted.
@@ -39,28 +39,32 @@ def commands(lines):
 
 
 def parse_profiles(lines):
-    result={};current=None;uid=None;curves={};total_points=0
+    result={};current=None;uid=None;curves={};blocked=set();total_points=0
     def save():
-        if current=='PencilBrushDetail' and uid and curves:
+        if current in ('PencilBrushDetail','PencilReductionSettings') and uid and curves:
             if uid.lower() not in result and len(result)>=4096:
                 raise ValueError('ASCII brush profile node budget exceeded')
-            result[uid.lower()]={key:dict(value) for key,value in curves.items()}
+            valid={key:dict(value) for key,value in curves.items() if key not in blocked}
+            if valid:result[uid.lower()]=valid
     for command in commands(lines):
         text=command.strip()
         created=re.match(r'^createNode\s+(\w+)\b',text)
         if created:
-            save();current=created[1];uid=None;curves={};continue
-        if current!='PencilBrushDetail':continue
+            save();current=created[1];uid=None;curves={};blocked=set();continue
+        if current not in ('PencilBrushDetail','PencilReductionSettings'):continue
         renamed=re.fullmatch(r'rename\s+-uid\s+"([A-Fa-f0-9-]+)"',text)
         if renamed:uid=renamed[1];continue
-        matched=re.fullmatch(r'setAttr\s+(?:-s\s+\d+\s+)?"\.(srcps|sacps|srBezierControlPoints|saBezierControlPoints)\[(\d+)(?::(\d+))?\]"\s+(.+)',text,re.S)
+        if current=='PencilReductionSettings' and re.match(r'^setAttr\s+(?:-s\s+\d+\s+)?"\.(?:rscps|rsBezierControlPoints)\[\d+\]\.',text):
+            blocked.add('rscps');continue
+        matched=re.fullmatch(r'setAttr\s+(?:-s\s+\d+\s+)?"\.(srcps|sacps|rscps|srBezierControlPoints|saBezierControlPoints|rsBezierControlPoints)\[(\d+)(?::(\d+))?\]"\s+(.+)',text,re.S)
         if not matched:continue
         start,end=int(matched[2]),int(matched[3] or matched[2])
         if not 0<=start<=end<=8191:continue
         try:values=[float(token) for token in matched[4].split()]
         except ValueError:continue
         if len(values)!=(end-start+1)*7 or not all(math.isfinite(v) for v in values):continue
-        root={'srBezierControlPoints':'srcps','saBezierControlPoints':'sacps'}.get(matched[1],matched[1])
+        root={'srBezierControlPoints':'srcps','saBezierControlPoints':'sacps','rsBezierControlPoints':'rscps'}.get(matched[1],matched[1])
+        if (root=='rscps')!=(current=='PencilReductionSettings'):continue
         rows=curves.setdefault(root,{})
         for i in range(start,end+1):
             if i not in rows:total_points+=1

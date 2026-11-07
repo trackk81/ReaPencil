@@ -32,8 +32,15 @@ static double pencil_coverage(double radius,double distance,double a,double b) n
  auto tent=[&](double r){return positive_average(distance+r,a,b)-2*positive_average(distance,a,b)+positive_average(distance-r,a,b);};
  return std::clamp(tent(radius)-(radius>1?tent(radius-1):0.),0.,1.);
 }
-API int rp_profile_runs(float* image,int w,int h,int64_t stride,const double* runs,int64_t count,
- const double* original,double u0,double u1,double base,double smoothing,const double* wl,int nw,const double* al,int na) noexcept {
+// World-relative endpoints, with perspective-correct interpolation per fragment.
+static double reference_distance(const double* r,double t) noexcept {
+ t=std::clamp(t,0.,1.);double xyz[3];
+ if(r[2])for(int k=0;k<3;++k)xyz[k]=r[3+k]+t*(r[6+k]-r[3+k]);
+ else{double z=1/((1-t)/r[0]+t/r[1]);for(int k=0;k<3;++k)xyz[k]=z*((1-t)*r[3+k]/r[0]+t*r[6+k]/r[1]);}
+ return std::hypot(xyz[0],xyz[1],xyz[2]);
+}
+static int profile_runs(float* image,int w,int h,int64_t stride,const double* runs,int64_t count,
+ const double* original,double u0,double u1,double base,double smoothing,const double* wl,int nw,const double* al,int na,const double* depth_values=nullptr,const double* alpha_depth=nullptr,const double* width_depth=nullptr,const double* alpha_reference=nullptr,const double* width_reference=nullptr) noexcept {
  if(!image||!runs||!original||!wl||!al||w<=0||h<=0||nw<2||na<2||base<0)return -1;
  const double dx=original[2]-original[0],dy=original[3]-original[1],den=std::max(dx*dx+dy*dy,1e-30),radius=base*.5;
  for(int64_t k=0;k<count;++k){const double* p=runs+k*7;
@@ -60,6 +67,10 @@ API int rp_profile_runs(float* image,int w,int h,int64_t stride,const double* ru
    // Clamping at each mesh edge would create alpha/width plateaus under caps.
    double ot=((px-original[0])*dx+(py-original[1])*dy)/den;
    double u=u0+(u1-u0)*ot,width=base*value(wl,nw,u);if(width<=0)continue;
+   if(width_depth){double t=std::clamp(ot,0.,1.);
+    double z=width_reference?reference_distance(width_reference,t):(width_depth[2]?width_depth[0]+t*(width_depth[1]-width_depth[0]):1/((1-t)/width_depth[0]+t/width_depth[1]));
+    double q=std::clamp((z-width_depth[3])/(width_depth[4]-width_depth[3]),0.,1.);
+    width*=width_depth[5]+q*(width_depth[6]-width_depth[5]);if(width<=0)continue;}
    double coverage;
    if(smoothing>0){
     double nx=-vy/length,ny=vx/length;
@@ -69,13 +80,31 @@ API int rp_profile_runs(float* image,int w,int h,int64_t stride,const double* ru
     coverage=pencil_coverage(width*.5/smoothing,distance/smoothing,std::abs(nx)*.5/smoothing,std::abs(ny)*.5/smoothing);
    }else coverage=std::clamp(width*.5+.5-distance,0.,1.);
    coverage*=value(al,na,u);
+   if(alpha_depth){double t=std::clamp(ot,0.,1.);
+    double z=alpha_reference?reference_distance(alpha_reference,t):(alpha_depth[2]?alpha_depth[0]+t*(alpha_depth[1]-alpha_depth[0]):1/((1-t)/alpha_depth[0]+t/alpha_depth[1]));
+    double q=std::clamp((z-alpha_depth[3])/(alpha_depth[4]-alpha_depth[3]),0.,1.);
+    coverage*=alpha_depth[5]+q*(alpha_depth[6]-alpha_depth[5]);}
    float* out=image+int64_t(y)*stride+x*4;
-   if(coverage>out[3]){out[0]=float(p[4]*coverage);out[1]=float(p[5]*coverage);out[2]=float(p[6]*coverage);out[3]=float(coverage);}
+   if(coverage>out[3]){
+    if(depth_values){double t=std::clamp(ot,0.,1.),z=depth_values[4]?depth_values[0]+t*(depth_values[1]-depth_values[0]):1/((1-t)/depth_values[0]+t/depth_values[1]);
+     double v=std::clamp(1-(z-depth_values[2])/(depth_values[3]-depth_values[2]),0.,1.);out[0]=out[1]=out[2]=float(v*coverage);
+    }else{out[0]=float(p[4]*coverage);out[1]=float(p[5]*coverage);out[2]=float(p[6]*coverage);}out[3]=float(coverage);}
    }
   }
  }
  return 0;
 }
+
+API int rp_profile_runs(float* image,int w,int h,int64_t stride,const double* runs,int64_t count,const double* original,double u0,double u1,double base,double smoothing,const double* wl,int nw,const double* al,int na) noexcept {
+ return profile_runs(image,w,h,stride,runs,count,original,u0,u1,base,smoothing,wl,nw,al,na);}
+API int rp_profile_runs_depth(float* image,int w,int h,int64_t stride,const double* runs,int64_t count,const double* original,double u0,double u1,double base,double smoothing,const double* wl,int nw,const double* al,int na,const double* depth_values) noexcept {
+ return profile_runs(image,w,h,stride,runs,count,original,u0,u1,base,smoothing,wl,nw,al,na,depth_values);}
+API int rp_profile_runs_reduced(float* image,int w,int h,int64_t stride,const double* runs,int64_t count,const double* original,double u0,double u1,double base,double smoothing,const double* wl,int nw,const double* al,int na,const double* depth_values,const double* alpha_depth) noexcept {
+ return profile_runs(image,w,h,stride,runs,count,original,u0,u1,base,smoothing,wl,nw,al,na,depth_values,alpha_depth);}
+API int rp_profile_runs_depth_width(float* image,int w,int h,int64_t stride,const double* runs,int64_t count,const double* original,double u0,double u1,double base,double smoothing,const double* wl,int nw,const double* al,int na,const double* depth_values,const double* alpha_depth,const double* width_depth) noexcept {
+ return profile_runs(image,w,h,stride,runs,count,original,u0,u1,base,smoothing,wl,nw,al,na,depth_values,alpha_depth,width_depth);}
+API int rp_profile_runs_reference(float* image,int w,int h,int64_t stride,const double* runs,int64_t count,const double* original,double u0,double u1,double base,double smoothing,const double* wl,int nw,const double* al,int na,const double* depth_values,const double* alpha_depth,const double* width_depth,const double* alpha_reference,const double* width_reference) noexcept {
+ return profile_runs(image,w,h,stride,runs,count,original,u0,u1,base,smoothing,wl,nw,al,na,depth_values,alpha_depth,width_depth,alpha_reference,width_reference);}
 
 #include "cpu_visibility.h"
 #include "cpu_profile_segments.h"
@@ -135,3 +164,5 @@ API int rp_profile_coordinates(const double* points,const double* world,const in
  return 0;
  }catch(...){return -1;}
 }
+
+#include "cpu_brush_blend.h"

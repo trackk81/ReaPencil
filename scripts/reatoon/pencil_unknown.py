@@ -22,8 +22,16 @@ def is_unknown(node):
 
 def saved_profile_points(node,prefix):
     """Saved-file snapshot fallback, never an evaluation of source MEL."""
-    if not is_unknown(node) or kind(node)!='PencilBrushDetail':return None
-    if cmds.listConnections(node,source=True,destination=False):return None
+    expected='PencilReductionSettings' if prefix=='rs' else 'PencilBrushDetail'
+    if not is_unknown(node) or kind(node)!=expected:return None
+    reader=Reader(node)
+    for plug in reader.fn.getConnections():
+        sources=plug.connectedTo(True,False)
+        if not sources:continue
+        local=plug.name().split('.',1)[1]
+        reference=(prefix=='rs' and local in ('rsObject',reader.alias('rsObject')) and
+                   all(source.attribute().hasFn(om.MFn.kMessageAttribute) and source.node().hasFn(om.MFn.kTransform) for source in sources))
+        if not reference:return None
     path=cmds.file(query=True,sceneName=True)
     if not path:return None
     from pathlib import Path
@@ -33,7 +41,7 @@ def saved_profile_points(node,prefix):
     else:return None
     try:
         uid=(cmds.ls(node,uuid=True) or [''])[0].lower()
-        rows=read_profiles(path).get(uid,{}).get({'sr':'srcps','sa':'sacps'}[prefix])
+        rows=read_profiles(path).get(uid,{}).get({'sr':'srcps','sa':'sacps','rs':'rscps'}[prefix])
     except (OSError,ValueError):return None
     if not rows:return None
     return [list(row) for _,row in sorted(rows.items())]
@@ -97,6 +105,14 @@ class Reader:
         paths=[prefix+sep+child for child in children]
         if paths and any(self.plug(child) is not None for child in paths):
             return [self.get(child,0.) for child in paths]
+        # Original LineSet saves some non-default channel switches in public
+        # visible*/hidden* shadow attributes while omitting the compound leaf.
+        # Read a shadow only if it was actually retained in this file.
+        match=re.fullmatch(r'lineData\[([01])\]\.([A-Za-z_]\w*)',path)
+        if self.kind=='PencilLineSet' and match:
+            leaf=match[2];shadow=('visible' if match[1]=='0' else 'hidden')+leaf[0].upper()+leaf[1:]
+            if shadow in self.schema.get('aliases',{}) and self.plug(shadow) is not None:
+                return self.get(shadow,default)
         return self.schema.get('defaults',{}).get(path,default)
 
     def indices(self,path):

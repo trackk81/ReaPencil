@@ -30,7 +30,9 @@ def _table(points,tolerance):
         dx=h[0]-cp[0]
         if (out and dx<=0) or (not out and dx>=0):return np.asarray([cp[0],h[1]])
         bound=other[3];x=min(max(h[0],min(cp[0],bound)),max(cp[0],bound))
-        return np.asarray([x,cp[1]+(h[1]-cp[1])*(x-cp[0])/dx])
+        # Source runtime limits X to the neighboring knot while preserving Y.
+        # Projecting the handle along its slope changes out-of-span profiles.
+        return np.asarray([x,h[1]])
     for left,right in zip(rows,rows[1:]):
         a=np.asarray(left[3:5]);d=np.asarray(right[3:5])
         if left[0]==right[0]==0:
@@ -100,3 +102,30 @@ def maya_float_profile(points):
     """Pencil coordinate plugs are Maya float attributes, including MA reloads."""
     rows=validate_profile(points)
     return validate_profile([[row[0],*np.asarray(row[1:],np.float32).astype(np.float64).tolist()] for row in rows])
+
+
+def flat_reduction_value(rows):
+    """Exact flat, full-span reduction profile; do not flatten a bent handle.
+
+    Source replays129/130 cover flat alpha/width and mixed handle types.
+    Linear handles are irrelevant; non-Linear handles must share the exact Y.
+    Keep source ordering, and deliberately reject partial/ambiguous profiles.
+    """
+    if not isinstance(rows,(list,tuple)) or not 2<=len(rows)<=256:return None
+    try:
+        if any(len(row)!=7 or any(isinstance(v,bool) or not isinstance(v,(int,float)) or not math.isfinite(v) for v in row) for row in rows):return None
+        if any(row[0] not in (0,1,2,3) for row in rows):return None
+        if rows[0][3]!=0 or rows[-1][3]!=1:return None
+        if any(a[3]>=b[3] for a,b in zip(rows,rows[1:])):return None
+        value=rows[0][4]
+        if not 0<=value<=1:return None
+        for row in rows:
+            if not 0<=row[3]<=1 or row[4]!=value:return None
+            if row[0]!=0 and (row[2]!=value or row[6]!=value or any(abs(row[i])>10 for i in (1,5))):return None
+        return float(value)
+    except (TypeError,ValueError,OverflowError):return None
+
+
+def flat_reduction_alpha_value(rows):
+    """Compatibility name for the alpha-only129 recognizer."""
+    return flat_reduction_value(rows)

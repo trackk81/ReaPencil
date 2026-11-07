@@ -158,7 +158,7 @@ __kernel void diagonal_outlines(__global const double *v,__global const int2 *pa
 __kernel void edges(__global const double *v,__global const int2 *pairs,
  __global const int2 *ranges,__global const int *adjacent,__global const int *metadata,
  __global const int *owners,__global const double4 *normals,__global const double4 *centers,
- __global const int *features,__global const double *crease,__global const double *camera,
+ __global const int *features,__global const double2 *crease,__global const double *camera,
  __global double4 *output,__global int *output_owner,volatile __global int *counter,__global const int *styles,__global const int *selected_styles,__global int2 *output_meta,__global const int *outline_counts,int count) {
     int i=get_global_id(0);if(i>=count)return;int owner=2147483647;int2 r=ranges[i];
     for(int k=0;k<r.y;k++){int s=styles[adjacent[r.x+k]];if(s>=0)owner=min(owner,s);}
@@ -174,7 +174,7 @@ __kernel void edges(__global const double *v,__global const int2 *pairs,
     int meta=(metadata[i]&~64)|((selected==-3?(metadata[i]&64):(selected==owner?64:0)));
     int front_count=(enabled&4)?outline_counts[i]:0;
     int flags=(enabled&1) | ((r.y==1)?(enabled&2):0) | ((front_count>0&&front_count<r.y&&r.y>1)?(enabled&4):0)
-        | ((r.y>1 && min_dot<crease[owner]-1e-8)?(enabled&8):0) | (meta&enabled);
+        | ((r.y>1 && min_dot<crease[owner].x-1e-8 && min_dot>=crease[owner].y-1e-8)?(enabled&8):0) | (meta&enabled);
     if(!flags) return;
     int index=atomic_inc(counter);int2 p=pairs[i];
     output[2*index]=(double4)(point(v,p.x),1);output[2*index+1]=(double4)(point(v,p.y),1);output_owner[index]=owner;

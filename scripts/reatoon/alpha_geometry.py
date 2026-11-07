@@ -18,37 +18,51 @@ def contours(alpha, threshold=.5, simplify=.25):
     h,w=a.shape
     a=np.pad(a,1,constant_values=0)
     a[np.abs(a-threshold)<1e-7]=threshold+1e-7
-    corners=np.stack((a[:-1,:-1],a[:-1,1:],a[1:,1:],a[1:,:-1]),-1)
-    codes=((corners>=threshold)*np.array([1,2,4,8])).sum(-1)
-    segments=[]
-    # Coordinates below are in pixels, with bottom-left UV origin.
-    for y,x in zip(*np.nonzero((codes!=0)&(codes!=15))):
-        values=corners[y,x];pts=np.array([[x-.5,h-y+.5],[x+.5,h-y+.5],
-                                        [x+.5,h-y-.5],[x-.5,h-y-.5]])
-        crossings=[]
-        for i in range(4):
-            j=(i+1)%4
-            if (values[i]>=threshold)!=(values[j]>=threshold):
-                t=(threshold-values[i])/(values[j]-values[i])
-                crossings.append((i,pts[i]+t*(pts[j]-pts[i])))
-        if len(crossings)==2:segments.append((crossings[0][1],crossings[1][1]))
-        else:
-            # Asymptotic decider for the bilinear saddle, not arbitrary diagonals.
-            f=values-threshold;q=f[0]*f[2]-f[1]*f[3]
-            pairs=((0,1),(2,3)) if q>=0 else ((0,3),(1,2))
-            for i,j in pairs:segments.append((crossings[i][1],crossings[j][1]))
-    if not segments:return []
-    points={};adj=defaultdict(list)
-    for a,b in segments:
-        ka=tuple(np.round(a,10));kb=tuple(np.round(b,10))
+    inside=a>=threshold
+    codes=(inside[:-1,:-1].astype(np.uint8)+2*inside[:-1,1:].astype(np.uint8)+
+           4*inside[1:,1:].astype(np.uint8)+8*inside[1:,:-1].astype(np.uint8))
+    y,x=np.nonzero((codes!=0)&(codes!=15))
+    if not len(x):return []
+    values=np.stack((a[y,x],a[y,x+1],a[y+1,x+1],a[y+1,x]),axis=1)
+    # Batch the same arithmetic, retaining the original row/edge order and
+    # bottom-left UV origin. Only boundary cells need double-precision corners.
+    pts=np.stack((np.column_stack((x-.5,h-y+.5)),np.column_stack((x+.5,h-y+.5)),
+                  np.column_stack((x+.5,h-y-.5)),np.column_stack((x-.5,h-y-.5))),axis=1)
+    crossings=(values>=threshold)!=np.roll(values>=threshold,-1,axis=1)
+    coordinates=np.empty_like(pts)
+    for i in range(4):
+        j=(i+1)%4;use=crossings[:,i]
+        t=(threshold-values[use,i])/(values[use,j]-values[use,i])
+        coordinates[use,i]=pts[use,i]+t[:,None]*(pts[use,j]-pts[use,i])
+    edges=np.arange(4);first=np.argmax(crossings,axis=1)
+    last=np.max(np.where(crossings,edges,-1),axis=1);rows=np.arange(len(x))
+    segments=np.empty((len(x),2,2,2),np.float64)
+    segments[:,0,0]=coordinates[rows,first];segments[:,0,1]=coordinates[rows,last]
+    saddle=crossings.sum(axis=1)==4
+    # Preserve the bilinear asymptotic decider and its segment ordering.
+    f=values[saddle]-threshold;q=f[:,0]*f[:,2]-f[:,1]*f[:,3]
+    which=np.flatnonzero(saddle);positive=which[q>=0];negative=which[q<0]
+    segments[positive,0]=coordinates[positive][:,[0,1]]
+    segments[positive,1]=coordinates[positive][:,[2,3]]
+    segments[negative,0]=coordinates[negative][:,[0,3]]
+    segments[negative,1]=coordinates[negative][:,[1,2]]
+    keep=np.column_stack((np.ones(len(x),bool),saddle)).ravel()
+    segments=segments.reshape(-1,2,2)[keep]
+    # One bulk rounding pass replaces two small NumPy calls per segment.
+    keys=np.round(segments,10).tolist();points={};adj=defaultdict(list)
+    for (a,b),(ka,kb) in zip(segments,keys):
+        ka=tuple(ka);kb=tuple(kb)
         if ka==kb:continue
         points[ka]=a;points[kb]=b;adj[ka].append(kb);adj[kb].append(ka)
     if any(len(v)!=2 for v in adj.values()):
         # Exact samples equal to the threshold can create a four-way junction.
         raise ValueError('Degenerate alpha contour; change the threshold slightly')
     remaining=set(adj);loops=[]
-    while remaining:
-        first=min(remaining);key=first;previous=None;loop=[]
+    # Keep the same deterministic start/order without repeatedly scanning every
+    # unvisited vertex for each small hole in a foliage texture.
+    for first in sorted(adj):
+        if first not in remaining:continue
+        key=first;previous=None;loop=[]
         while True:
             loop.append(points[key]);remaining.discard(key)
             following=next(k for k in adj[key] if k!=previous)
@@ -133,7 +147,7 @@ def clip_polygon(p,triangle):
     return p
 
 
-def triangulate_uv(triangle,cells,wrap=True):
+def triangulate_uv(triangle,cells,wrap=True,_bounds=None):
     """Return filled convex polygons in the triangle, as barycentric weights."""
     uv=np.asarray(triangle,np.float64)
     if not wrap and (np.min(uv)<-1e-10 or np.max(uv)>1+1e-10):
@@ -148,11 +162,27 @@ def triangulate_uv(triangle,cells,wrap=True):
     for shift in tiles:
         t=uv-np.asarray(shift)
         lo=t.min(axis=0);hi=t.max(axis=0)
+        contained=None;rejected=None
         if isinstance(cells,np.ndarray):
-            selected=cells[np.all(cells.max(axis=1)>=lo-1e-10,axis=1)&np.all(cells.min(axis=1)<=hi+1e-10,axis=1)]
+            lower,upper=_bounds if _bounds is not None else (cells.min(axis=1),cells.max(axis=1))
+            selected=cells[np.all(upper>=lo-1e-10,axis=1)&np.all(lower<=hi+1e-10,axis=1)]
+            # Most small opacity triangles are wholly inside one source UV
+            # triangle. Preserve their exact vertices instead of clipping them
+            # three times. Near-duplicate vertices still use the original path.
+            sign=1 if _cross(t[1]-t[0],t[2]-t[0])>0 else -1
+            contained=np.ones(len(selected),bool);rejected=np.zeros(len(selected),bool)
+            for a,b in zip(t,np.roll(t,-1,axis=0)):
+                inside=sign*_cross(b-a,selected-a)>=-1e-11
+                # Reject only before any edge would clip the original polygon.
+                # This is exactly the old clipper's empty result, including its
+                # tolerance, without assumptions about intermediate rounding.
+                rejected |= contained & ~np.any(inside,axis=1)
+                contained &= np.all(inside,axis=1)
+            contained &= np.all(np.linalg.norm(selected-np.roll(selected,1,axis=1),axis=2)>1e-10,axis=1)
         else:selected=[c for c in cells if np.all(c.max(axis=0)>=lo-1e-10) and np.all(c.min(axis=0)<=hi+1e-10)]
-        for cell in selected:
-            p=clip_polygon(cell,t)
+        for index,cell in enumerate(selected):
+            if rejected is not None and rejected[index]:continue
+            p=cell if contained is not None and contained[index] else clip_polygon(cell,t)
             if len(p)<3:continue
             area=abs(np.sum(_cross(p,np.roll(p,-1,axis=0))))
             if area<1e-15:continue
@@ -166,7 +196,7 @@ def triangulate_uv(triangle,cells,wrap=True):
 def cut_mesh(vertices,triangles,triangle_faces,triangle_uvs,face_cells,wrap=True):
     """Build cutout topology; map every output vertex to three source vertices."""
     vertices=np.asarray(vertices,np.float64);triangles=np.asarray(triangles,np.int64)
-    points=[];bind_ids=[];bind_weights=[];faces=[];source_faces=[];lookup={};templates={}
+    points=[];bind_ids=[];bind_weights=[];faces=[];source_faces=[];lookup={};templates={};bounds={}
     def vertex(ids,weights):
         # The sparse original-vertex binding also welds across triangle/UV seams.
         values={int(i):float(w) for i,w in zip(ids,weights) if abs(w)>1e-9}
@@ -179,7 +209,10 @@ def cut_mesh(vertices,triangles,triangle_faces,triangle_uvs,face_cells,wrap=True
         if cells is None:polygons=[np.eye(3)]
         else:
             key=(id(cells),tuple(np.round(np.asarray(uv).ravel(),12)),wrap)
-            if key not in templates:templates[key]=triangulate_uv(uv,cells,wrap)
+            if key not in templates:
+                if isinstance(cells,np.ndarray) and id(cells) not in bounds:
+                    bounds[id(cells)]=(cells.min(axis=1),cells.max(axis=1))
+                templates[key]=triangulate_uv(uv,cells,wrap,_bounds=bounds.get(id(cells)))
             polygons=templates[key]
         for weights in polygons:
             poly=[vertex(ids,w) for w in weights]

@@ -11,7 +11,7 @@ MENU = "reaToonMainMenu"
 _controls = {}
 _editing_set = None
 _menu_watcher = None
-LINE_KEYS = ("line_width", "line_color", "hidden_lines", "hidden_color", "outline", "open_edges", "crease", "crease_angle", "material_boundaries", "hard_edges", "selected_edges", "wireframe", "intersections", "self_intersections", "distance_reduction", "width_variation", "taper", "dash_length")
+LINE_KEYS = ("line_width", "line_color", "hidden_lines", "hidden_color", "outline", "open_edges", "crease", "crease_angle", "crease_angle_max", "material_boundaries", "hard_edges", "selected_edges", "wireframe", "intersections", "self_intersections", "distance_reduction", "width_variation", "taper", "dash_length")
 
 
 def _safe(function, *args):
@@ -287,9 +287,14 @@ def _persist():
         if _editing_set:
             if not cmds.objExists(_editing_set):
                 raise ValueError("선택한 라인셋이 삭제되었습니다. 목록을 새로 고침하세요.")
-            overrides = maya_scene._json_attr(_editing_set, "reaToonOverrides")
-            overrides.update(_editor_values())
-            maya_scene._json_attr(_editing_set, "reaToonOverrides", overrides)
+            from . import line_graph
+            if cmds.nodeType(_editing_set)=='revToonLineSet':
+                overrides=line_graph.get_settings(_editing_set)
+                overrides.update(_editor_values());line_graph.set_settings(_editing_set,overrides)
+            else:
+                overrides = maya_scene._json_attr(_editing_set, "reaToonOverrides")
+                overrides.update(_editor_values())
+                maya_scene._json_attr(_editing_set, "reaToonOverrides", overrides)
         maya_scene.save_settings(values)
     return values
 
@@ -297,7 +302,10 @@ def _persist():
 def _refresh_sets(selected=None):
     control = _controls['sets'][1]
     cmds.textScrollList(control, edit=True, removeAll=True)
-    nodes = sorted(maya_scene._tagged('lineSet', 'objectSet'))
+    from . import line_graph
+    modern=[s for line in line_graph.list_lines() for s in line_graph.list_sets(line)]
+    nodes = modern+sorted(maya_scene._tagged('lineSet', 'objectSet'))
+    if selected is None and modern:selected=modern[0]
     cmds.textScrollList(control, edit=True, append=[tr('Scene defaults')] + nodes)
     cmds.textScrollList(control, edit=True, selectItem=selected if selected in nodes else tr('Scene defaults'))
     _select_set()
@@ -309,7 +317,12 @@ def _select_set(*_):
     _editing_set = None if selected[0] == tr('Scene defaults') else selected[0]
     values = maya_scene.load_settings()
     if _editing_set:
-        values.update(maya_scene._json_attr(_editing_set, 'reaToonOverrides'))
+        from . import line_graph
+        if cmds.nodeType(_editing_set)=='revToonLineSet':
+            for line in line_graph.snapshot():
+                for item in line['sets']:
+                    if item['node']==_editing_set:values.update(item['settings'])
+        else:values.update(maya_scene._json_attr(_editing_set, 'reaToonOverrides'))
     for key in LINE_KEYS:
         kind, control = _controls[key]
         if kind == 'bool':
@@ -318,7 +331,9 @@ def _select_set(*_):
             cmds.floatFieldGrp(control, edit=True, value1=values[key])
         elif kind == 'color':
             cmds.colorSliderGrp(control, edit=True, rgbValue=values[key])
-    members = cmds.sets(_editing_set, query=True) or [] if _editing_set else []
+    if _editing_set and cmds.nodeType(_editing_set)=='revToonLineSet':
+        targets=line_graph.get_targets(_editing_set);members=targets['objects']+targets['shaders']
+    else:members = cmds.sets(_editing_set, query=True) or [] if _editing_set else []
     cmds.textScrollList(_controls['members'][1], edit=True, removeAll=True)
     if members:
         cmds.textScrollList(_controls['members'][1], edit=True, append=members)
@@ -328,6 +343,15 @@ def _select_set(*_):
 def _membership(action):
     if not _editing_set:
         raise ValueError('먼저 실제 라인셋을 선택하세요.')
+    if cmds.nodeType(_editing_set)=='revToonLineSet':
+        from . import line_graph
+        if action=='select':
+            targets=line_graph.get_targets(_editing_set);cmds.select(targets['objects']+targets['shaders'],replace=True)
+        elif action=='remove':
+            members=cmds.textScrollList(_controls['members'][1],q=True,selectItem=True) or []
+            for kind in ('objects','shaders'):line_graph.remove_targets(_editing_set,members,kind)
+        else:line_graph.add_targets(_editing_set,cmds.ls(selection=True,long=True) or [])
+        _select_set();return
     if action == 'select':
         members = cmds.sets(_editing_set, query=True) or []
         cmds.select(members, replace=True) if members else cmds.select(clear=True)
@@ -394,7 +418,7 @@ def show_advanced():
     for key,label in [('supersample','오버샘플링 (1–4)'),('seed','난수 시드')]:
         _field(key,label,values)
     _end_frame()
-    _frame('이전 버전 objectSet 라인셋 · Legacy',collapsed=True)
+    _frame('Line Sets',collapsed=False)
     cmds.rowLayout(numberOfColumns=2, adjustableColumn=2)
     cmds.columnLayout(adjustableColumn=True, width=240)
     cmds.text(label=tr('라인셋 목록'), align='left')
@@ -419,6 +443,7 @@ def show_advanced():
     for key,label in [('outline','윤곽선'),('open_edges','열린 경계'),('intersections','오브젝트 교차선'),('self_intersections','자기 교차선'),('hard_edges','하드 에지'),('material_boundaries','재질 경계'),('selected_edges','라인셋에 저장한 선택 에지'),('crease','법선 각도'),('wireframe','모든 폴리곤 에지')]:
         _field(key,label,values)
     _field('crease_angle','법선 각도 최소값 (도)',values)
+    _field('crease_angle_max','Normal angle maximum',values)
     _end_frame()
     _frame('브러시 설정 · Brush Settings')
     _field('line_color','가시선 색',values)
@@ -428,12 +453,12 @@ def show_advanced():
     hidden = cmds.columnLayout(adjustableColumn=True, rowSpacing=6)
     _field('hidden_lines','은선 표시',values)
     _field('hidden_color','은선 색',values)
-    cmds.text(label=tr('은선의 선 종류와 두께는 가시선 설정을 공유합니다.\nPencil+의 독립 은선 브러시·종류별 브러시는 아직 지원하지 않습니다.'), align='left', wordWrap=True, height=48)
+    cmds.text(label=tr('독립 은선 브러시와 선 종류별 상세 설정은 Attribute Editor에서 편집합니다.'), align='left', wordWrap=True, height=48)
     cmds.setParent('..')
     brush = cmds.columnLayout(adjustableColumn=True, rowSpacing=6)
     for key,label in [('distance_reduction','거리별 두께 감소'),('width_variation','두께 변화 (0–1)'),('taper','에지 끝 가늘게 (0–1)'),('dash_length','점선 길이 (픽셀)')]:
         _field(key,label,values)
-    cmds.text(label=tr('위 항목은 ReaPencil의 간소화된 스트로크 기능입니다.\n브러시 이미지·텍스처 맵·혼합 모드·원본 감소 곡선은 지원하지 않습니다.'), align='left', wordWrap=True, height=48)
+    cmds.text(label=tr('종류별 브러시와 상세 곡선은 Line Window / Attribute Editor에서 편집합니다.'), align='left', wordWrap=True, height=48)
     cmds.setParent('..')
     cmds.tabLayout(tabs, edit=True, tabLabel=tr(((visible,'가시선 · Visible'),(hidden,'은선 · Hidden'),(brush,'브러시 상세 · Detail'))))
     cmds.setParent('..')

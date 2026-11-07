@@ -379,3 +379,23 @@ STRINGS.update({'Stroke split angle (degrees)':'획 분할 각도 (도)','Loop d
 
 
 STRINGS['Materials with no assigned faces: ']='어느 면에도 적용되지 않은 등록 재질: '
+
+STRINGS.update({'Normal angle minimum':'법선 각도 최소값 (도)','Normal angle maximum':'법선 각도 최대값 (도)'})
+
+STRINGS.update({'Independent hidden settings (CPU)':'숨은 선 독립 설정 (CPU)','Hidden filters and brush (CPU)':'숨은 선 필터 및 브러시 (CPU)','Per-type brushes (CPU)':'선 종류별 전용 브러시 (CPU)','Independent filters and per-type brushes apply to CPU rendering. Viewport previews remain approximate.':'독립 필터와 종류별 브러시는 CPU 렌더에 적용됩니다. 뷰포트 프리뷰는 근사 표시입니다.'})
+
+STRINGS.update({'Brush opacity (CPU)':'브러시 불투명도 (CPU)','Blend mode (CPU)':'브러시 합성 모드 (CPU)','Normal':'일반','Additive':'더하기','Subtractive':'빼기','Multiply':'곱하기','Screen':'스크린','Overlay':'오버레이','Hard Light':'하드 라이트','Soft Light':'소프트 라이트','Darken':'어둡게','Lighten':'밝게','Difference':'차이','Exclusion':'제외','Hue':'색조','Saturation':'채도','Color':'색상','Luminosity':'명도'})
+
+STRINGS['Mixed curve/opacity/blend effects are embedded CPU images at full resolution, not editable vector strokes.']='곡선·불투명도·합성 효과는 출력 해상도의 CPU 이미지로 포함됩니다. 편집 가능한 벡터 선은 아닙니다.'
+
+STRINGS.update({'Depth reduction (CPU)': '거리별 감소 (CPU)', 'Hidden depth reduction (CPU)': '숨은 선 거리별 감소 (CPU)', 'Width reduction': '선폭 감소', 'Alpha reduction': '알파 감소', 'Camera depth; two-endpoint Linear reduction. Final CPU render only.': '카메라 깊이 기준 두 끝점의 선형 감소입니다. 최종 CPU 렌더에 적용됩니다.', 'Start distance': '시작 거리', 'End distance': '종료 거리', 'Start factor': '시작 배율', 'End factor': '종료 배율', 'Line Set no longer exists.': '라인셋이 삭제되었습니다.', 'Enable independent hidden settings first.': '먼저 숨은 선 독립 설정을 켜주세요.'})
+
+STRINGS.update({'Apply':'적용','Invalid alpha depth reduction range':'시작 거리는 종료 거리보다 작아야 합니다. 거리는 1~1,000,000, 배율은 0~1 범위입니다.'})
+
+STRINGS.update({'Reference origins are current-frame snapshots; reimport after changes.':'참조 원점은 현재 프레임의 저장값입니다. 참조가 바뀌면 다시 가져오세요.','Reference snapshot (world): ':'참조 원점 저장값 (월드): '})
+
+STRINGS.update({'Connected reference origins update for every CPU render.':'연결된 참조 원점은 CPU 렌더마다 자동 갱신됩니다.','Live reference: ':'연결된 참조: ','Freeze current reference':'현재 참조 원점 고정'})
+
+STRINGS['No reference origin to freeze']='고정할 참조 원점이 없습니다.'
+
+STRINGS.update({'Camera depth': '카메라 깊이', 'Bind selected transform': '선택한 참조 연결', 'Use camera depth': '카메라 깊이 사용', 'Pending live reference: ': '연결 대기: ', 'Select one reference transform.': '참조할 트랜스폼 하나를 선택하세요.', 'Selected reference no longer exists.': '선택했던 참조 오브젝트가 삭제되었습니다.', 'Instanced reference transforms are ambiguous': '인스턴스 트랜스폼은 참조 경로가 모호합니다.', 'Reference must be a transform': '참조는 트랜스폼이어야 합니다.'})

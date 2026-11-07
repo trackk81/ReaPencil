@@ -1,6 +1,6 @@
 """Read verified Maya 2025 FOR8 brush-control payloads without loading Pencil.
 
-Only the observed PencilBrushDetail node ID, CREA UUID layout and finite CMPD
+Only observed BrushDetail/ReductionSettings node IDs, CREA UUID layout and CMPD
 double rows are decoded. Unknown variants fail closed; this is not a general
 Maya Binary reader. Geometry payloads are skipped by seeking, never scanned.
 """
@@ -12,11 +12,12 @@ import struct
 import uuid
 
 BRUSH_DETAIL_TYPE=bytes.fromhex('00124f83')
+REDUCTION_TYPE=bytes.fromhex('00124f85')
 
 
 def decode_curve(payload):
     name,sep,tail=payload.partition(b'\0')
-    match=re.fullmatch(rb'(srcps|sacps)\[(\d+)(?::(\d+))?\]',name)
+    match=re.fullmatch(rb'(srcps|sacps|rscps)\[(\d+)(?::(\d+))?\]',name)
     if not sep or not match or not tail or tail[0]!=0x24:return None
     first,last=int(match[2]),int(match[3] or match[2])
     if not 0<=first<=last<=8191:return None
@@ -41,7 +42,7 @@ def parse_profiles(stream,size):
         nxt=b if raw[:4]==b'FOR8' else a+((length+7)//8)*8
         if nxt>end:raise ValueError('FOR8 chunk padding exceeds its parent')
         return raw[:4],raw[4:8],a,b,nxt
-    def node(a,b):
+    def node(a,b,allowed):
         nonlocal points
         uid=None;curves={};hints={};blocked=set()
         while a<b:
@@ -59,28 +60,30 @@ def parse_profiles(stream,size):
             # not a payload type discriminator. Validate CMPD's own row marker.
             elif tag==b'FLGS' and end-start<=128:
                 stream.seek(start);name,sep,tail=stream.read(end-start).partition(b'\0')
-                if name in (b'srcps',b'sacps'):
+                if name in allowed:
                     root=name.decode('ascii')
                     if not sep or len(tail)!=5 or tail[0]!=0x2c or root in hints:
                         blocked.add(root)
                     else:hints[root]=int.from_bytes(tail[1:],'big')
             elif tag==b'DBLE' and end-start<=1048576:
                 stream.seek(start);name=stream.read(min(end-start,128)).partition(b'\0')[0]
-                match=re.match(rb'(srcps|sacps)\[',name)
-                if match:blocked.add(match[1].decode('ascii'))
+                match=re.match(rb'(srcps|sacps|rscps)\[',name)
+                if match and match[1] in allowed:blocked.add(match[1].decode('ascii'))
             elif tag==b'CMPD':
                 stream.seek(start)
                 payload=stream.read(end-start if end-start<=1048576 else 128)
                 decoded=decode_curve(payload) if end-start<=1048576 else None
                 if decoded:
-                    root,rows=decoded;target=curves.setdefault(root,{})
+                    root,rows=decoded
+                    if root.encode('ascii') not in allowed:a=nxt;continue
+                    target=curves.setdefault(root,{})
                     points+=len(set(rows)-set(target))
                     if points>131072:raise ValueError('Binary brush control-point budget exceeded')
                     if set(rows)&set(target):raise ValueError('Overlapping binary brush control rows')
                     target.update(rows)
                 else:
-                    match=re.match(rb'(srcps|sacps)\[',payload.partition(b'\0')[0])
-                    if match:blocked.add(match[1].decode('ascii'))
+                    match=re.match(rb'(srcps|sacps|rscps)\[',payload.partition(b'\0')[0])
+                    if match and match[1] in allowed:blocked.add(match[1].decode('ascii'))
             a=nxt
         curves={root:rows for root,rows in curves.items() if root not in blocked and len(rows)==hints.get(root)}
         if uid and curves:
@@ -94,7 +97,8 @@ def parse_profiles(stream,size):
             if tag==b'FOR8':
                 if end-start<4:raise ValueError('Missing FOR8 group type')
                 stream.seek(start);kind=stream.read(4)
-                if kind==BRUSH_DETAIL_TYPE:node(start+4,end)
+                if kind==BRUSH_DETAIL_TYPE:node(start+4,end,(b'srcps',b'sacps'))
+                elif kind==REDUCTION_TYPE:node(start+4,end,(b'rscps',))
                 else:walk(start+4,end,depth+1)
             a=nxt
     if size<20:raise ValueError('Truncated Maya Binary file')

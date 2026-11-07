@@ -33,7 +33,11 @@ class PackedSegments:
             self.parts[-1]['vertex_ids']=prepared['pairs'][indices]
         self.count+=len(indices)
 
-    def add_intersections(self,mesh,index,rows,style,line):
+    def add_intersections(self,mesh,index,rows,style,line,self_intersection=False):
+        if '_brush_channels' in style:
+            from .brush_channels import feature_styles
+            for child in feature_styles(style,'intersection',self_intersection):self.add_intersections(mesh,index,rows,child,line,self_intersection)
+            return
         self._flush()
         if not len(rows):return
         self.parts.append(dict(points=rows[:,:6].reshape(-1,2,3),flags=np.full(len(rows),128,np.uint8),
@@ -82,6 +86,7 @@ class PackedSegments:
             features=['intersection'] if part.get('intersection') else [name for bit,name in enumerate(EDGE_FEATURES) if int(part['flags'][index])&(1<<bit)],
             mesh_index=part['mesh_index'],mesh=part['mesh'],settings=part['settings'],line=part['line'])
         if 'vertex_ids' in part:result['_vertex_ids']=tuple(int(v) for v in part['vertex_ids'][index])
+        if 'profile_u' in part:result['_profile_u']=part['profile_u'][index]
         return result
 
     def __getitem__(self,index):

@@ -1,0 +1,7 @@
+Offline accelerator wheels: numba 0.61.2 and llvmlite 0.44.0 (CPython 3.11 Windows x64).
+Downloaded from the public PyPI distribution using pinned versions.
+Wheel contents are unmodified; upstream copyright and license notices are retained.
+THIRD_PARTY_LICENSES/numba-0.61.2/LICENSE
+THIRD_PARTY_LICENSES/numba-0.61.2/LICENSES.third-party
+THIRD_PARTY_LICENSES/llvmlite-0.44.0/LICENSE
+THIRD_PARTY_LICENSES/llvmlite-0.44.0/LICENSE.thirdparty

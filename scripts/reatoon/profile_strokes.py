@@ -12,6 +12,7 @@ def assign_coordinates(segments,camera,project):
     records=list(segments);groups={};xy={}
     for i,row in enumerate(records):
         style=row['settings']
+        if '_profile_u' in row:continue
         if not (style.get('width_profile') or style.get('alpha_profile')):continue
         points=(np.asarray([row['a'],row['b']])-camera['eye'])@camera['basis'].T
         # Clipping through the eye has no finite projected path length.
@@ -79,7 +80,7 @@ def assign_coordinates(segments,camera,project):
     return records
 
 
-def draw(layer,p,q,ts,mask,color,width,style,u,low,pixel_scale=1.):
+def draw(layer,p,q,ts,mask,color,width,style,u,low,pixel_scale=1.,depth_values=None,alpha_depth=None,width_depth=None,alpha_reference=None,width_reference=None):
     """Coalesce visible samples, then evaluate exact adaptive profiles per pixel."""
     from .cpu_brush import draw_runs
     indices=np.flatnonzero(mask)
@@ -91,7 +92,7 @@ def draw(layer,p,q,ts,mask,color,width,style,u,low,pixel_scale=1.):
         a=p+ts[first]*(q-p)-low;b=p+ts[last+1]*(q-p)-low
         runs.append([*a,*b,*color])
     w,a=stroke_tables(style)
-    draw_runs(layer,runs,np.r_[p-low,q-low],u[0],u[1],width,w,a,smoothing=pixel_scale if '_profile_source_width' in style else 0.)
+    draw_runs(layer,runs,np.r_[p-low,q-low],u[0],u[1],width,w,a,smoothing=pixel_scale if '_profile_source_width' in style else 0.,depth_values=depth_values,alpha_depth=alpha_depth,width_depth=width_depth,alpha_reference=alpha_reference,width_reference=width_reference)
     return len(runs)
 
 

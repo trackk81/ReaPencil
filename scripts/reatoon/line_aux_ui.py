@@ -290,6 +290,7 @@ def _build_element(node):
     _choice('separator','Separator',data.get('separator','_'),[('_','_'),('-','-'),('.','.')],save)
     if data.get('kind')=='eps':
         _choice('file_type','File type',data.get('file_type','eps'),[('EPS','eps'),('Adobe Illustrator EPS','ai_eps')],save)
+        cmds.text(label=tr('Mixed curve/opacity/blend effects are embedded CPU images at full resolution, not editable vector strokes.'),align='left',wordWrap=True,height=42)
     else:
         _choice('output_element','Output element',data.get('output_element','color'),
                 [('Line Color','color'),('Z Depth','depth'),('Velocity (unsupported)','velocity')],save,disabled=('velocity',))

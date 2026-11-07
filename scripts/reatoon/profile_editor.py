@@ -3,7 +3,7 @@ from .i18n import tr
 _dialogs=[]
 
 
-def open_editor(node,key):
+def open_editor(node,key,getter=None,setter=None):
     from PySide6 import QtCore,QtGui,QtWidgets
     from maya import OpenMayaUI
     import shiboken6
@@ -46,10 +46,13 @@ def open_editor(node,key):
     def apply():
         try:
             from .line_editor import _safe,_setting
-            points=values();_safe(_setting,node,key,points);dialog.accept()
+            points=values()
+            if setter is None:_safe(_setting,node,key,points)
+            else:setter(points)
+            dialog.accept()
         except (ValueError,TypeError,AttributeError) as error:status.setText(str(error))
     for label,callback in [('Add point',lambda:add()),('Remove selected',remove),('Reset to constant',lambda:(table.setRowCount(0),update())),('Apply',apply),('Cancel',dialog.reject)]:
         button=QtWidgets.QPushButton(tr(label));button.clicked.connect(lambda checked=False,fn=callback:fn());buttons.addWidget(button)
-    for row in line_graph.get_settings(node).get(key,[]):add(row)
+    for row in (getter() if getter is not None else line_graph.get_settings(node).get(key,[])):add(row)
     table.cellChanged.connect(update);update();_dialogs.append(dialog)
-    dialog.finished.connect(lambda *_:_dialogs.remove(dialog) if dialog in _dialogs else None);dialog.show()
+    dialog.finished.connect(lambda *_:_dialogs.remove(dialog) if dialog in _dialogs else None);dialog.show();return dialog

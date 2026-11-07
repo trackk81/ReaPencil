@@ -95,7 +95,8 @@ def _prepare(camera_name,aspect):
         return
     path=maya_scene._dag(camera_name);camera=vp._camera_data(path,aspect)
     if vp._watchers_stale:vp._watch_scene()
-    settings=maya_scene.load_settings()
+    from . import preview_settings
+    settings=preview_settings.load()
     rebuilt=vp._gpu_scene is None or vp._gpu_rebuild
     if rebuilt:
         geometry_cache=(vp._gpu_scene.smooth_rebuild_cache() if vp._smooth_rebuild_only and vp._gpu_scene is not None and not vp._gpu_scene.empty else None)
@@ -125,6 +126,7 @@ def _prepare(camera_name,aspect):
         for item in _passes:
             nodes=line_graph.list_sets(item['line']) if item['line'] else []
             item['style_nodes']=[nodes[int(s['_order'])] for s in item['styles']] if nodes else []
+    preview_settings.filter_passes(_passes)
     if live.scene.get('merge_groups'):raise retained_geometry.UnsupportedRetained('Merge Groups use the legacy GPU viewport')
     if any(s.get(k) for item in _passes for s in item['styles'] for k in ('hidden_lines','dash_length','distance_reduction','width_variation','taper')):
         raise retained_geometry.UnsupportedRetained('Advanced brush styles use the legacy GPU viewport')

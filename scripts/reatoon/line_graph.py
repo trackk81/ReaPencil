@@ -272,7 +272,7 @@ def snapshot():
         for index, node in enumerate(list_sets(line)):
             if not cmds.getAttr(node + ".active"):
                 continue
-            values = dict(get_settings(line), **get_settings(node))
+            values = dict(get_settings(line), **resolved_settings(node))
             values["output_to_elements_only"] = bool(cmds.getAttr(line + ".outputToRE"))
             values["_order"] = index
             targets = get_targets(node)
@@ -480,3 +480,107 @@ def export_merge_groups(meshes):
         group["mesh_indices"] = [i for i in group["mesh_indices"] if i not in claimed]
         claimed.update(group["mesh_indices"])
     return [dict(group, id=index) for index, group in enumerate(groups) if group["mesh_indices"]]
+
+
+_missing_reduction_references={}
+
+
+def _reduction_reference_attr(channel,hidden=False):
+    if channel not in ('alpha','width'):raise ValueError('Unknown reduction channel')
+    return 'reaPencil'+('Hidden' if hidden else 'Visible')+channel.capitalize()+'Reference'
+
+
+def reduction_reference(node,channel,hidden=False):
+    attr=_reduction_reference_attr(channel,hidden)
+    if _reference_enabled(node,attr) is False:return None
+    if not cmds.attributeQuery(attr,node=node,exists=True):return None
+    if cmds.getAttr(node+'.'+attr,type=True)!='message':raise ValueError('Reference attribute must be a message')
+    inputs=cmds.listConnections(node+'.'+attr,source=True,destination=False) or []
+    return inputs[0] if len(inputs)==1 else None
+
+
+def _reference_world_origin(reference):
+    selection=om.MSelectionList();selection.add(reference);obj=selection.getDependNode(0)
+    if not obj.hasFn(om.MFn.kTransform):raise ValueError('Reference must be a transform')
+    paths=om.MDagPath.getAllPathsTo(obj)
+    if len(paths)!=1:raise ValueError('Instanced reference transforms are ambiguous')
+    from .depth_reduction import validate_origin
+    return validate_origin(list(paths[0].inclusiveMatrix())[12:15])
+
+
+def bind_reduction_reference(node,channel,reference,hidden=False):
+    """Attach a real DG message link, retaining a serialized import snapshot."""
+    origin=_reference_world_origin(reference);values=get_settings(node)
+    target=values.setdefault('hidden_style',{}) if hidden else values
+    if not target.get(channel+'_depth_reduction'):raise ValueError('Enable reduction parameters before binding a reference')
+    attr=_reduction_reference_attr(channel,hidden)
+    if cmds.attributeQuery(attr,node=node,exists=True):
+        if cmds.getAttr(node+'.'+attr,type=True)!='message':raise ValueError('Reference attribute must be a message')
+    else:cmds.addAttr(node,longName=attr,attributeType='message')
+    if not cmds.isConnected(reference+'.message',node+'.'+attr):cmds.connectAttr(reference+'.message',node+'.'+attr,force=True)
+    _set_reference_enabled(node,attr,True)
+    target[channel+'_reduction_origin']=origin;set_settings(node,values)
+    _missing_reduction_references.pop(node+'.'+attr,None)
+
+
+def _reference_enabled(node,attr):
+    name=attr+'Enabled'
+    if not cmds.attributeQuery(name,node=node,exists=True):return None # 0.8.37 message-only links.
+    if cmds.getAttr(node+'.'+name,type=True)!='bool':raise ValueError('Reference enabled attribute must be boolean')
+    return bool(cmds.getAttr(node+'.'+name))
+
+
+def _set_reference_enabled(node,attr,value):
+    name=attr+'Enabled'
+    if not cmds.attributeQuery(name,node=node,exists=True):cmds.addAttr(node,longName=name,attributeType='bool',defaultValue=True)
+    elif cmds.getAttr(node+'.'+name,type=True)!='bool':raise ValueError('Reference enabled attribute must be boolean')
+    cmds.setAttr(node+'.'+name,bool(value))
+
+
+def clear_reduction_reference(node,channel,hidden=False):
+    attr=_reduction_reference_attr(channel,hidden);plug=node+'.'+attr
+    if not cmds.attributeQuery(attr,node=node,exists=True):
+        if _reference_enabled(node,attr) is not None:_set_reference_enabled(node,attr,False)
+        return
+    if cmds.getAttr(plug,type=True)!='message':raise ValueError('Reference attribute must be a message')
+    # Keep the slot: referenced-scene attributes cannot always be deleted.
+    # Explicit disabled state distinguishes camera/frozen mode from a broken link.
+    _set_reference_enabled(node,attr,False)
+    for source in cmds.listConnections(plug,source=True,destination=False,plugs=True) or []:cmds.disconnectAttr(source,plug)
+    _missing_reduction_references.pop(plug,None)
+
+
+def resolved_settings(node):
+    """Read current reference matrices; never write DG/JSON while rendering."""
+    values=get_settings(node)
+    for hidden in (False,True):
+        target=values.get('hidden_style',{}) if hidden else values
+        for channel in ('alpha','width'):
+            if not target.get(channel+'_depth_reduction'):continue
+            attr=_reduction_reference_attr(channel,hidden);plug=node+'.'+attr
+            enabled=_reference_enabled(node,attr)
+            if enabled is False:continue
+            if not cmds.attributeQuery(attr,node=node,exists=True) and enabled is not True:continue # Old snapshot scenes.
+            reference=reduction_reference(node,channel,hidden)
+            try:
+                if reference is None:raise ValueError('Missing reference')
+                target[channel+'_reduction_origin']=_reference_world_origin(reference)
+                _missing_reduction_references.pop(plug,None)
+            except (RuntimeError,ValueError,TypeError):
+                if not target.get(channel+'_reduction_origin'):raise ValueError('Reference binding has no valid fallback snapshot: '+plug)
+                identity=(cmds.ls(node,uuid=True) or [''])[0]
+                if _missing_reduction_references.get(plug)!=identity:
+                    cmds.warning('ReaPencil: reference unavailable; using stored world-origin snapshot: '+plug)
+                    _missing_reduction_references[plug]=identity
+    return values
+
+
+def freeze_reduction_reference(node,channel,hidden=False):
+    from .maya_scene import undo_chunk
+    current=resolved_settings(node);leaf=current.get('hidden_style',{}) if hidden else current
+    origin=leaf.get(channel+'_reduction_origin')
+    if not origin:raise ValueError('No reference origin to freeze')
+    values=get_settings(node);target=values.setdefault('hidden_style',{}) if hidden else values
+    target[channel+'_reduction_origin']=list(origin)
+    with undo_chunk('ReaPencil Freeze Reference'):
+        set_settings(node,values);clear_reduction_reference(node,channel,hidden)

@@ -76,8 +76,14 @@ def _brush_profile(node,prefix,report):
         if not rows:raise ValueError('Missing control points')
         rows=maya_float_profile(rows)
         for left,right in zip(rows,rows[1:]):
-            if (left[0]!=0 and not left[3]<=left[5]<=right[3]) or (right[0]!=0 and not left[3]<=right[1]<=right[3]):
+            if (left[0]!=0 and left[5]<left[3]) or (right[0]!=0 and right[1]>right[3]):
                 raise ValueError('handles outside adjacent control points: original runtime evaluation is not verified')
+            if left[0]!=0 and right[0]!=0 and left[5]>=right[3] and right[1]<=left[3]:
+                # Already-clamped and out-of-span storage render identically in
+                # source replay; both must have the same unsupported contract.
+                raise ValueError('handles outside adjacent control points or at their opposing limits: paired crossing handles have an unverified singular inverse')
+        if any((a[0]!=0 and a[5]>b[3]) or (b[0]!=0 and b[1]<a[3]) for a,b in zip(rows,rows[1:])):
+            _issue(report,node,prefix+' out-of-span handle X limited to adjacent knots, preserving handle Y; paired singular crossings and backward-facing handles remain unsupported')
         profile_table(rows)
     except (TypeError,ValueError) as error:
         _issue(report,node,prefix+' curve was not converted: '+str(error));return 1.,[]
@@ -210,6 +216,82 @@ def _shader_targets(materials, report, source):
     return sorted(set(result))
 
 
+def _channel_brush(brush,report):
+    """Supported independent brush snapshot; unsupported detail stays explicit."""
+    value=dict(line_color=_get(brush,'color',[0,0,0]),line_width=max(.1,min(64.,float(_get(brush,'size',1)))),
+               line_opacity=float(_get(brush,'blendAmount',1.)),blend_mode=int(_get(brush,'blendMode',0)),brush_key=_uuid(brush))
+    if not .1<=float(_get(brush,'size',1))<=64:_issue(report,brush,'Independent brush size clamped to 0.1..64 pixels')
+    details=_incoming(brush,'brushDetails')
+    if details:
+        detail=details[0];scale,curve=_brush_profile(detail,'sr',report)
+        value['brush_size_scale']=scale;value['width_profile']=curve
+        alpha_scale,value['alpha_profile']=_brush_profile(detail,'sa',report)
+        value['line_opacity']*=alpha_scale
+        value.update(profile_direction=float(_get(detail,'stDirectionAngle',-30.)),profile_split_angle=float(_get(detail,'stLineSplitAngle',90.)),profile_loop_direction=int(_get(detail,'stLoopDirection',0)),pencil_profile_width=bool(curve or value['alpha_profile']))
+        if _get(detail,'stLineType',0)==1:
+            value.update(dash_length=float(_get(detail,'stLength',5.)),dash_gap=float(_get(detail,'stSpace',5.)))
+            _issue(report,detail,'Independent brush dash length/space imported; connected dash phase remains approximate')
+        if _get(detail,'diEnable',False) or _get(detail,'stLineCopy',1)!=1:
+            _issue(report,detail,'independent brush distortion/copies are not reproduced')
+    if _incoming(brush,'color') or _incoming(brush,'size'):
+        _issue(report,brush,'Independent brush texture/procedural inputs sampled at current frame')
+    return value
+
+
+def _constant_reduction(lineset,prefix,channel,report,target=None):
+    """Verified Linear snapshot; preserve scalar folds and explicit exclusions."""
+    if not _get(lineset,prefix+channel+'ReductionOn',False):return 1.
+    nodes=_incoming(lineset,prefix+channel+'Reduction')
+    if not nodes:
+        _issue(report,lineset,prefix+channel+' reduction enabled without a node; not reproduced');return 1.
+    node=nodes[0]
+    from . import pencil_unknown
+    if pencil_unknown.kind(node)!='PencilReductionSettings':
+        _issue(report,node,'Reduction curve on an unknown node is not verified; not reproduced');return 1.
+    referenced=bool(_get(node,'rsReferObject',False))
+    fields=('CurveType','LeftHandleX','LeftHandleY','ControlPointX','ControlPointY','RightHandleX','RightHandleY')
+    rows=[[_get(node,'rsBezierControlPoints[%d].rsBezier'%index+field,None) for field in fields] for index in _indices(node,'rsBezierControlPoints')]
+    if pencil_unknown.is_unknown(node):
+        rows=pencil_unknown.saved_profile_points(node,'rs')
+        if rows is None:
+            _issue(report,node,'Saved reduction curve snapshot is unavailable; not reproduced');return 1.
+        _issue(report,node,'Reduction curve recovered as a source-file snapshot by UUID; animation/procedural inputs and unsaved edits are not evaluated')
+    from .brush_profiles import flat_linear_value
+    try:value=flat_linear_value([(r[0],r[3],r[4]) for r in rows]) if rows and all(None not in r for r in rows) else None
+    except (TypeError,ValueError):value=None
+    flat_non_linear=False
+    if value is None and channel in ('alpha','size'):
+        from .brush_profiles import flat_reduction_value
+        value=flat_reduction_value(rows)
+        flat_non_linear=value is not None
+    if value is None:
+        from .depth_reduction import linear_endpoints,validate
+        endpoints=linear_endpoints(rows)
+        if target is not None and endpoints is not None:
+            try:parameters=validate([_get(node,'rsStart',100.),_get(node,'rsEnd',1000.),*endpoints])
+            except ValueError:parameters=[]
+            if parameters:
+                if referenced:
+                    from .depth_reduction import validate_origin
+                    references=_incoming(node,'rsObject')
+                    paths=cmds.ls(references[0],long=True) if len(references)==1 else []
+                    try:
+                        if len(paths)!=1 or not cmds.objectType(paths[0],isAType='transform'):raise ValueError('Reference must be one transform')
+                        from .line_graph import _reference_world_origin
+                        origin=validate_origin(_reference_world_origin(paths[0]))
+                    except (RuntimeError,ValueError,TypeError):
+                        _issue(report,node,'Unresolved reference origin; distance reduction is not reproduced');return 1.
+                    target[('alpha' if channel=='alpha' else 'width')+'_reduction_origin']=origin
+                    report.setdefault('reference_bindings',[]).append(dict(source_line_set_uuid=_uuid(lineset),hidden='[1]' in prefix,channel='alpha' if channel=='alpha' else 'width',reference=paths[0]))
+                    _issue(report,node,'Reference transform world origin imported with a live message binding and a stored fallback snapshot')
+                target['alpha_depth_reduction' if channel=='alpha' else 'width_depth_reduction']=parameters
+                _issue(report,node,prefix+channel+' Linear distance reduction imported for native CPU fragments')
+                return 1.
+        _issue(report,node,'Nonconstant or non-Linear distance reduction is not reproduced');return 1.
+    _issue(report,node,prefix+channel+(' exact flat non-Linear reduction imported as an existing CPU multiplier; nonconstant handles are excluded' if flat_non_linear else ' constant Linear reduction imported as an existing CPU multiplier'))
+    return value
+
+
 def inspect_scene():
     """Return a JSON-serializable conversion plan without changing the scene."""
     from . import maya_scene
@@ -260,8 +342,7 @@ def inspect_scene():
                 overrides['merge_groups'] = bool(_get(node, visible+'edgeOutlineMergeGroups', False))
                 overrides['lineset_id'] = int(_get(node, 'id', 1))
                 overrides['hidden_lines'] = any(_get(node, hidden+a, False) for a in mapping.values() if a.endswith('On'))
-                if _get(node, visible+'edgeNormalAngleMax', 180) != 180:
-                    _issue(report,node,'edgeNormalAngleMax upper bound is ignored')
+                overrides['crease_angle_max'] = float(_get(node, visible+'edgeNormalAngleMax', 180))
                 overrides['crease_angle'] = float(_get(node, visible+'edgeNormalAngleMin', 40))
                 for prefix, color_key in ((visible,'line_color'), (hidden,'hidden_color')):
                     brushes = _incoming(node, prefix+'brushSettings')
@@ -293,37 +374,40 @@ def inspect_scene():
                                 # until corner/loop phase is implemented.
                                 overrides['connect_collinear_dashes'] = float(_get(detail, 'stLineSplitAngle', 90.)) == 0.
                                 _issue(report, detail, 'CPU dash length/space and collinear polygon connections imported; corner/loop phase, split-angle behavior, randomization and viewport parity are not reproduced')
-                        if _get(brush,'blendMode',0):
-                            _issue(report,node,'brush blend mode and its opacity are not reproduced')
-                        elif prefix == visible:
+                        if prefix==visible:
                             overrides['line_opacity']=float(_get(brush,'blendAmount',1.))*alpha_scale
-                        elif _get(brush,'blendAmount',1.)!=1.:
-                            _issue(report,node,'independent hidden brush opacity is not implemented')
+                            overrides['blend_mode']=int(_get(brush,'blendMode',0))
+                            overrides['brush_key']=_uuid(brush)
                 if overrides['hidden_lines']:
-                    _issue(report,node,'independent hidden-edge filters/width; shared filters are used')
-                for attr in ('edgeObjectOn','edgeSelectedOn','sizeReductionOn','alphaReductionOn'):
-                    if _get(node,visible+attr,False):
-                        _issue(report,node,attr)
-                for attr in ('edgeSpecificOutlineOn','edgeSpecificObjectOn','edgeSpecificIntersectionOn','edgeSpecificSmoothOn','edgeSpecificMaterialOn','edgeSpecificSelectedOn','edgeSpecificNormalAngleOn','edgeSpecificWireframeOn'):
-                    if _get(node,visible+attr,False):
-                        _issue(report,node,attr)
+                    h={key:bool(_get(node,hidden+attr,False)) for key,attr in mapping.items()}
+                    h['open_edges'] &= h['outline'];h['self_intersections'] &= h['intersections']
+                    h.update(selected_edges=False,crease_angle=float(_get(node,hidden+'edgeNormalAngleMin',40)),
+                             crease_angle_max=float(_get(node,hidden+'edgeNormalAngleMax',180)),
+                             merge_groups=bool(_get(node,hidden+'edgeOutlineMergeGroups',False)))
+                    brushes=_incoming(node,hidden+'brushSettings')
+                    if brushes:h.update(_channel_brush(brushes[0],report))
+                    overrides['hidden_style']=h
+                specific_types={'Outline':'outline','Intersection':'intersection','Smooth':'hard',
+                                'Material':'material','Selected':'selected','NormalAngle':'crease','Wireframe':'wireframe'}
+                for prefix in (visible,hidden):
+                    target=overrides if prefix==visible else overrides.get('hidden_style',{})
+                    specifics={}
+                    for source,feature in specific_types.items():
+                        if not _get(node,prefix+'edgeSpecific'+source+'On',False):continue
+                        brushes=_incoming(node,prefix+'edge'+source)
+                        if brushes:specifics[feature]=_channel_brush(brushes[0],report)
+                        else:_issue(report,node,prefix+'edge'+source+': enabled brush has no connection; base brush is used')
+                    if specifics:target['feature_brushes']=specifics
+                    for channel,key in (('size','brush_size_scale'),('alpha','line_opacity')):
+                        factor=_constant_reduction(node,prefix,channel,report,target)
+                        if factor!=1.:
+                            for brush in [target,*specifics.values()]:brush[key]=float(brush.get(key,1.))*factor
+                    for attr in ('edgeObjectOn','edgeSelectedOn','edgeSpecificObjectOn'):
+                        if _get(node,prefix+attr,False):_issue(report,node,prefix+attr+' is not reproduced')
                 targets = _targets(_incoming(node,'objects'),report,node)
                 report['line_sets'].append({'source':node,'source_uuid':_uuid(node),'line':line,
                                            'active': bool(_get(node, 'on', True)),
                                            'members':targets,'shaders':_shader_targets(_incoming(node, 'materials'), report, node), 'overrides':overrides})
-    # Safe partial mapping: one normal visible brush only. Other configurations
-    # retain the previous output and receive an explicit compatibility issue.
-    eligible=len(report['line_sets'])==1 and len(active)==1
-    for item in report['line_sets']:
-        overrides=item['overrides']
-        if overrides.get('alpha_profile') and (not eligible or overrides.get('hidden_lines',False)):
-            overrides.pop('alpha_profile',None)
-            _issue(report,item['source'],'varying alpha requires one visible-only LineSet; alpha curve was not converted')
-        if overrides.get('line_opacity',1.)!=1. and (not eligible or overrides.get('hidden_lines',False)):
-            overrides.pop('line_opacity',None)
-            _issue(report,item['source'],'brush opacity requires one visible-only LineSet; opacity was not converted')
-        elif overrides.get('line_opacity',1.)!=1.:
-            _issue(report,item['source'],'Normal brush opacity imported for single-style CPU raster/SVG; viewport and mixed/hidden brush opacity are not reproduced')
     _inspect_extras(report)
     from . import pencil_unknown
     unknown=[n for kind in pencil_unknown.SCHEMA for n in _nodes(kind) if pencil_unknown.is_unknown(n)]
@@ -404,6 +488,13 @@ def import_scene():
                 report['updated_line_sets'].append(node)
             _mark_source(node,key)
             line_graph.set_settings(node,item['overrides'])
+            bindings={(b['hidden'],b['channel']):b['reference'] for b in report.get('reference_bindings',[]) if b['source_line_set_uuid']==item['source_uuid']}
+            for hidden in (False,True):
+                for channel in ('alpha','width'):
+                    reference=bindings.get((hidden,channel))
+                    channel_settings=item['overrides'].get('hidden_style',{}) if hidden else item['overrides']
+                    if reference and channel_settings.get(channel+'_depth_reduction'):line_graph.bind_reduction_reference(node,channel,reference,hidden)
+                    else:line_graph.clear_reduction_reference(node,channel,hidden)
             line_graph.set_active(node,item['active'])
             targets = line_graph.get_targets(node)
             line_graph.remove_targets(node,targets['objects'])

@@ -137,7 +137,7 @@ class GPUScene:
         self.candidate_capacity = 8000000
         self.candidates = self.buf(self.candidate_capacity*8)
         self.camera = self.buf(7*8)
-        self.features, self.crease, self.modes = self.buf(len(meshes)*4),self.buf(len(meshes)*8),self.buf(len(meshes)*8)
+        self.features, self.crease, self.modes = self.buf(len(meshes)*4),self.buf(len(meshes)*16),self.buf(len(meshes)*8)
         self._style_capacity=len(meshes)
         self._face_style_values=np.concatenate([np.full(len(m['faces']),i,np.int32) for i,m in enumerate(meshes)])
         self.face_styles=self.buf(self._face_style_values)
@@ -217,7 +217,7 @@ class GPUScene:
         if style_count>self._style_capacity:
             for old in (self.features,self.crease,self.modes):
                 old.close();self.buffers.remove(old)
-            self.features,self.crease,self.modes=self.buf(style_count*4),self.buf(style_count*8),self.buf(style_count*8)
+            self.features,self.crease,self.modes=self.buf(style_count*4),self.buf(style_count*16),self.buf(style_count*8)
             self._style_capacity=style_count
         if not np.array_equal(values,self._face_style_values):
             self.runtime.write(self.face_styles,values)
@@ -353,7 +353,7 @@ class GPUScene:
         feature_keys = ('wireframe','open_edges','outline','crease','material_boundaries','hard_edges','selected_edges')
         r = self.runtime
         features = np.asarray([sum((1<<i) for i,key in enumerate(feature_keys) if s.get(key,False)) for s in styles],np.int32)
-        crease = np.asarray([math.cos(math.radians(s.get('crease_angle',45))) for s in styles],np.float64)
+        crease = np.asarray([[math.cos(math.radians(s.get('crease_angle',45))), math.cos(math.radians(s.get('crease_angle_max',180)))] for s in styles],np.float64)
         eye = np.asarray(camera['position'],np.float64)
         forward = np.asarray(camera['target'],np.float64)-eye
         forward /= max(np.linalg.norm(forward),1e-30)

@@ -88,6 +88,7 @@ static int segment_range(const double* points,const double* widths,const double*
  if(context&&front&&z>surface+256*rpvis::epsilon*std::max(1.,std::abs(z))){double rx=(x-w/2.)/(ortho?w/span:focal),ry=-(y-h/2.)/(ortho?w/span:focal),origin[3],direction[3];
  for(int axis=0;axis<3;++axis){if(ortho){origin[axis]=eye[axis]+rx*basis[axis]+ry*basis[3+axis];direction[axis]=basis[6+axis];}else{origin[axis]=eye[axis];direction[axis]=rx*basis[axis]+ry*basis[3+axis]+basis[6+axis];}}
  if(owns)++result->checked;if(rpvis::occluded(origin,direction,nearz,z,*context)){if(owns)++result->hidden;front=false;}}
+ if(enabled[index]&2)front=!front;
  if(!front){if(run){record();run=false;}continue;}
  double sx=px+t0*dx,sy=py+t0*dy,ex=px+t1*dx,ey=py+t1*dy;
  if(!only[index]){if(!touched){edge.assign(int64_t(ymax-ymin)*(xmax-xmin)*4,0);touched=true;}rpvis::stroke(edge.data(),xmax-xmin,ymax-ymin,int64_t(xmax-xmin)*4,sx-xmin,sy-ymin,ex-xmin,ey-ymin,width*ss,colors+index*3);}

@@ -19,7 +19,7 @@ def library():
     if _lib is False:return None
     if _lib is None:
         try:
-            lib=ctypes.CDLL(str(Path(__file__).resolve().parents[2]/'plug-ins/2025/reaPencilCPU098.dll'))
+            lib=ctypes.CDLL(str(Path(__file__).resolve().parents[2]/'plug-ins/2025/reaPencilCPU111.dll'))
             lib.rp_facts.argtypes=[ctypes.c_void_p,ctypes.c_void_p,ctypes.c_int64]+[ctypes.c_void_p]*6
             lib.rp_facts.restype=ctypes.c_int
             lib.rp_bvh.argtypes=[ctypes.c_void_p]*2+[ctypes.c_int64]*2+[ctypes.c_void_p]*5
@@ -137,7 +137,7 @@ def triangle_mask(vertices,triangles,bounds,ortho,span,focal,near,far,bias,margi
     return out,counts
 
 def segments(points,widths,biases,colors,only,enabled,depth,planes,visible,ss,ortho,span,focal,near,far,visibility,eye,inverse_basis,stats):
-    arrays=[np.ascontiguousarray(a,dtype) for a,dtype in zip((points,widths,biases,colors,only,enabled),(np.float64,np.float64,np.float64,np.float64,np.bool_,np.bool_))]
+    arrays=[np.ascontiguousarray(a,dtype) for a,dtype in zip((points,widths,biases,colors,only,enabled),(np.float64,np.float64,np.float64,np.float64,np.bool_,np.uint8))]
     eye=np.ascontiguousarray(eye,np.float64);inverse_basis=np.ascontiguousarray(inverse_basis,np.float64)
     context=Visibility(*[visibility[i].ctypes.data for i in (0,3,4,5,1,2,6)],len(visibility[0])) if visibility is not None else None
     result=SegmentResult();h,w=depth.shape;lib=library()
