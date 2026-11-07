@@ -377,6 +377,5 @@ STRINGS.update({
 
 STRINGS.update({'Stroke split angle (degrees)':'획 분할 각도 (도)','Loop direction (0=CW, 1=CCW)':'폐곡선 방향 (0=시계, 1=반시계)','Match Pencil+ profile widths (CPU)':'Pencil+ 곡선 선폭 보정 (CPU)'})
 
-STRINGS.update({'Alpha Cut Prepass (Maya)':'알파 컷 사전 패스 (Maya)','Enable the depth prepass when opacity textures show no contours.':'불투명도 텍스처에 선이 없으면 깊이 사전 패스를 켜세요.'})
 
 STRINGS['Materials with no assigned faces: ']='어느 면에도 적용되지 않은 등록 재질: '
