@@ -22,6 +22,7 @@ _fixed_segments=0
 _fixed_batches=0
 _group_segment_counts={}
 MAX_RETAINED_GROUP_SEGMENTS=262144
+_profile_payload=None
 
 
 def _set_style(style_id,width,color):
@@ -39,6 +40,15 @@ def _set_style(style_id,width,color):
         alpha=validate(alpha)
     else:alpha=[0.,0.,1.,1.]
     _library.rt_style_alpha_depth(style_id,(c.c_float*4)(*alpha))
+    from .brush_profiles import profile_table
+    active=bool(style.get('width_profile') or style.get('alpha_profile'))
+    identity=[[0,0,1,0,1,0,1],[0,1,1,1,1,1,1]]
+    width_table=profile_table(style.get('width_profile') or identity)
+    alpha_table=profile_table(style.get('alpha_profile') or identity)
+    count=max(len(width_table),len(alpha_table));values=np.zeros((count,4),np.float32)
+    values[:len(width_table),:2]=width_table;values[:len(alpha_table),2:]=alpha_table
+    angles=(c.c_double*3)(style.get('profile_direction',-30.),style.get('profile_split_angle',90.),style.get('profile_loop_direction',0))
+    _library.rt_style_profiles(style_id,active,values.ctypes.data,len(width_table),len(alpha_table),angles,int(style.get('outline',False)))
 
 
 def _begin_pass():
@@ -58,6 +68,11 @@ def _add_bounded(points,parameters,style_id,width,color):
         if _group_segment_counts.get(style_id,0)+len(p)>MAX_RETAINED_GROUP_SEGMENTS:_begin_pass()
         if not _library.rt_add_retained(p.ctypes.data,q.ctypes.data,len(p),width,color):
             raise retained_geometry.UnsupportedRetained('Retained GPU buffer transfer failed')
+        if _profile_payload is not None:
+            vertices,flags=_profile_payload
+            ids=np.ascontiguousarray(vertices[first:first+len(p)],np.int64)
+            bits=np.ascontiguousarray(flags[first:first+len(p)],np.int64)
+            _library.rt_profile_metadata(p.ctypes.data,ids.ctypes.data,bits.ctypes.data,len(p))
         _group_segment_counts[style_id]=_group_segment_counts.get(style_id,0)+len(p)
 
 def bind(lib):
@@ -78,7 +93,11 @@ def bind(lib):
         lib.rt_edge_positions.argtypes=[c.c_void_p,c.c_void_p,c.c_uint,c.c_void_p,c.c_void_p];lib.rt_edge_positions.restype=None
     lib.rt_add.argtypes=[c.c_void_p,c.c_uint,c.c_float,c.POINTER(c.c_float),c.c_int,c.POINTER(c.c_float),c.c_int]
     lib.rt_add.restype=c.c_int
-    lib.rt_effect(str(Path(__file__).parent/'shaders/retained_lines172.ogsfx').encode('utf-8'))
+    lib.rt_style_profiles.argtypes=[c.c_uint,c.c_int,c.c_void_p,c.c_uint,c.c_uint,c.POINTER(c.c_double),c.c_int]
+    lib.rt_profile_metadata.argtypes=[c.c_void_p,c.c_void_p,c.c_void_p,c.c_uint]
+    lib.rt_profile_effect.argtypes=[c.c_char_p,c.c_wchar_p]
+    lib.rt_profile_effect(str(Path(__file__).parent/'shaders/retained_profiles175.ogsfx').encode('utf8'),str(Path(__file__).parents[2]/'plug-ins/2025/reaPencilBrush125.dll'))
+    lib.rt_effect(str(Path(__file__).parent/'shaders/retained_lines174.ogsfx').encode('utf-8'))
     if hasattr(lib,'rt_scope'):
         lib.rt_scope.argtypes=[c.c_char_p,c.c_void_p,c.c_uint];lib.rt_scope.restype=None
         from . import view_scope
@@ -127,6 +146,7 @@ def prepare(camera_name,aspect,draw_api=4,destination=''):
 
 def _draw_deferred(camera):
     """Upload only exceptional silhouette edges; retain all ordinary GPU data."""
+    global _profile_payload
     total=batches=0
     _begin_pass()
     for data,styles,offset,mesh_id in _deferred_entries:
@@ -140,7 +160,10 @@ def _draw_deferred(camera):
             style=styles[int(owner)];width=float(style.get('line_width',1.5))
             color=(c.c_float*3)(*style.get('line_color',[.04,.04,.07]))
             _set_style(offset+int(owner),width,color)
-            _add_bounded(points,parameters,offset+int(owner),width,color)
+            if style.get('width_profile') or style.get('alpha_profile'):
+                _profile_payload=(np.full((len(points),2),-1,np.int64),np.full(len(points),4,np.int64))
+            try:_add_bounded(points,parameters,offset+int(owner),width,color)
+            finally:_profile_payload=None
             total+=len(points);batches+=1
     return total,batches
 
@@ -211,9 +234,9 @@ def _prepare(camera_name,aspect):
             item['style_nodes']=[nodes[int(s['_order'])] for s in item['styles']] if nodes else []
     preview_settings.filter_passes(_passes)
     if live.scene.get('merge_groups'):raise retained_geometry.UnsupportedRetained('Merge Groups use the legacy GPU viewport')
-    if any(s.get(k) for item in _passes for s in item['styles'] for k in ('hidden_lines','dash_length','distance_reduction','width_variation','taper')):
+    if any(s.get(k) for item in _passes for s in item['styles'] for k in ('hidden_lines','dash_length','distance_reduction')):
         raise retained_geometry.UnsupportedRetained('Advanced brush styles use the legacy GPU viewport')
-    geometry_style_key=json.dumps([[{k:v for k,v in style.items() if k not in ('line_color','line_width','width_depth_reduction','alpha_depth_reduction')} for style in p['styles']] for p in _passes],sort_keys=True)
+    geometry_style_key=json.dumps([[dict({k:v for k,v in style.items() if k not in ('line_color','line_width','width_depth_reduction','alpha_depth_reduction','width_profile','alpha_profile')},_preview_profile=bool(style.get('width_profile') or style.get('alpha_profile'))) for style in p['styles']] for p in _passes],sort_keys=True)
     style_offset=0
     for item in _passes:
         item['retained_style_offset']=style_offset
@@ -233,7 +256,8 @@ def _prepare(camera_name,aspect):
     reuse=partial and changed and not rebuilt and not graph_dirty and geometry_style_key==_geometry_style_key
     _library.rt_begin();total=0;edge_total=0;cross_total=0;batch_count=0;pass_reports=[]
     _deferred_entries=[]
-    def submit(points,parameters,styles,owners):
+    def submit(points,parameters,styles,owners,vertices=None,flags=None,outline_eligible=None):
+        global _profile_payload
         nonlocal total,batch_count
         unique=np.unique(owners)
         for owner in unique:
@@ -243,7 +267,24 @@ def _prepare(camera_name,aspect):
             q=np.ascontiguousarray(parameters if len(unique)==1 else parameters[selected],np.float32)
             color=(c.c_float*3)(*style.get('line_color',[.04,.04,.07]))
             _set_style(item['retained_style_offset']+int(owner),float(style.get('line_width',1.5)),color)
-            _add_bounded(p,q,item['retained_style_offset']+int(owner),float(style.get('line_width',1.5)),color)
+            active=bool(style.get('width_profile') or style.get('alpha_profile'))
+            if active:
+                # A single incident face is an open edge, not a silhouette.
+                # Repeat its plane in this profiled batch so both GPU facing
+                # and native feature keys preserve that CPU distinction.
+                if outline_eligible is not None:
+                    eligible=outline_eligible if len(unique)==1 else outline_eligible[selected]
+                    q=q.copy();q[~eligible,1,:3]=q[~eligible,0,:3]
+                ids=np.full((len(points),2),-1,np.int64) if vertices is None else vertices
+                bits=np.zeros(len(points),np.int64) if flags is None else flags
+                ids=ids if len(unique)==1 else ids[selected]
+                bits=np.array(bits if len(unique)==1 else bits[selected],dtype=np.int64,copy=True)
+                from .preview_profiles import independent_edges
+                independent,ids=independent_edges(ids,bits,bool(style.get('outline',False)),trace_vertices=True)
+                bits[independent]|=512
+                _profile_payload=(ids,bits)
+            try:_add_bounded(p,q,item['retained_style_offset']+int(owner),float(style.get('line_width',1.5)),color)
+            finally:_profile_payload=None
             total+=len(p);batch_count+=1
     if not live.empty:
         for item in _passes:
@@ -280,7 +321,11 @@ def _prepare(camera_name,aspect):
                     parameters=np.zeros((len(data['owners']),2,4),np.float32)
                     parameters[:,0,:3]=data['normal0'];parameters[:,1,:3]=data['normal1']
                 parameters[:,0,3]=2*(i+1)+data['dynamic'];parameters[:,1,3]=2*(i+1)
-                submit(data['points'],parameters,styles,data['owners']);edge_total+=len(data['owners'])
+                vertex_ids=None
+                if any(s.get('width_profile') or s.get('alpha_profile') for s in styles):
+                    from .gpu_topology import prepare as topology
+                    top=topology(mesh);vertex_ids=np.concatenate((top['pairs'],top['diagonal_pairs']))[data['edge_ids']]
+                submit(data['points'],parameters,styles,data['owners'],vertex_ids,data['static_flags'],data['outline_eligible']);edge_total+=len(data['owners'])
                 item['deferred_cache'].pop(i,None)
                 if data.get('deferred') is not None:
                     item['deferred_cache'][i]=data['deferred']
@@ -304,6 +349,8 @@ def _prepare(camera_name,aspect):
         smooth_mesh_count=sum(m.get('smooth_level',0)>0 for m in live.scene['meshes']),
         geometry_generation=vp._generation,geometry_updated=changed,prepare_ms=(time.perf_counter()-started)*1000,
         camera_classification='GPU shader on every frame',intersection_diagnostics=pass_reports)
+    if any(s.get(k,0) for item in _passes for s in item['styles'] for k in ('taper','width_variation')):
+        vp._last_report['warnings']=['Taper and width variation are CPU render only; stroke profiles apply to normal preview.']
     vp._last_report.update(exceptional_edges=sum(len(d['owners']) for d,_,_,_ in _deferred_entries),
                            exceptional_visible_segments=deferred_count,retained_draw_groups=native_groups,
                            retained_group_segment_limit=MAX_RETAINED_GROUP_SEGMENTS)

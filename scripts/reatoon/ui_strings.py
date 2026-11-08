@@ -405,3 +405,7 @@ STRINGS.update({'Camera depth: width reduction in normal preview and CPU render.
 STRINGS.update({'Measure selected objects': '선택 오브젝트 깊이 측정', 'Fill this range from the selected mesh vertices using the active viewport camera. Distances are in cm. Click Apply to save.': '현재 뷰포트 카메라 기준으로 선택한 메시의 시작·종료 거리를 채웁니다. 단위는 cm이며 적용을 눌러 저장합니다.', 'Select mesh objects to measure.': '깊이를 측정할 메시 오브젝트를 선택하세요.', 'No camera is available for depth measurement.': '깊이를 측정할 카메라가 없습니다.', 'Select a valid camera for depth measurement.': '유효한 카메라를 지정하세요.', 'Camera transform has no valid viewing direction.': '카메라의 보기 방향을 계산할 수 없습니다.', 'Selected mesh contains invalid coordinates.': '선택 메시의 좌표가 올바르지 않습니다.', 'Selected mesh objects are behind the camera or its near clip plane.': '선택 메시가 카메라 뒤쪽 또는 근거리 클리핑 평면 뒤에 있습니다.', 'Measured depth exceeds the supported 1000000 cm range.': '측정 깊이가 지원 범위인 1,000,000cm를 초과합니다.', 'Measured camera: ': '측정 카메라: ', 'A small range was added because the selection has no depth span.': '선택 메시의 깊이 차이가 없어 최소 범위를 추가했습니다.'})
 
 STRINGS.update({'Fill width range from selection':'선택 오브젝트로 선폭 거리 채우기'})
+
+STRINGS.update({'Width profile':'선폭 곡선','Alpha profile':'알파 곡선'})
+
+STRINGS.update({'Legacy depth width reduction (CPU)':'이전 방식 선폭 감소 (CPU)','Camera depth reduction':'카메라 깊이별 감소','Taper and variation apply to CPU rendering.\nStroke width and alpha profiles apply to normal preview and CPU rendering.':'끝 가늘게·굵기 변화는 CPU 렌더에 적용됩니다.\n선폭·알파 곡선은 일반 프리뷰와 CPU 렌더에 적용됩니다.'})

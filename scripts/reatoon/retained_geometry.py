@@ -98,7 +98,7 @@ def candidates(mesh,face_styles,styles,selected_edges=None,cache=None,defer_nonm
         present=counts>1;triangles[present,3:]=tri[order[ends[present]-1]//3]
         size=int(keep.sum())
         data=dict(points=np.empty((size,2,3),np.float64),parameters=np.zeros((size,2,4),np.float32),
-            topology=np.ascontiguousarray(np.c_[pairs,triangles][keep],np.int32),owners=owners[keep],dynamic=(static[keep]==0),static_flags=static[keep],edge_ids=np.flatnonzero(keep))
+            topology=np.ascontiguousarray(np.c_[pairs,triangles][keep],np.int32),owners=owners[keep],dynamic=(static[keep]==0),static_flags=static[keep],outline_eligible=(counts[keep]>1),edge_ids=np.flatnonzero(keep))
         data['normal0']=data['parameters'][:,0,:3];data['normal1']=data['parameters'][:,1,:3]
         cache['template']=data;cache['evaluate'](mesh,data)
         return data
@@ -108,7 +108,7 @@ def candidates(mesh,face_styles,styles,selected_edges=None,cache=None,defer_nonm
     keep=(owners>=0)&((static!=0)|dynamic)
     return dict(points=np.ascontiguousarray(v[pairs[keep]]),owners=owners[keep],
                 normal0=plane0[keep],normal1=plane1[keep],dynamic=(static[keep]==0),
-                static_flags=static[keep],edge_ids=np.flatnonzero(keep),deferred=deferred)
+                static_flags=static[keep],outline_eligible=(counts[keep]>1),edge_ids=np.flatnonzero(keep),deferred=deferred)
 
 
 def deferred_camera_mask(data,camera):

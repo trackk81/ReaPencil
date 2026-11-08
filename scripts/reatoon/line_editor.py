@@ -336,18 +336,18 @@ def _set_changed(ctx):
     cmds.text(label=tr('Independent filters and per-type brushes apply to CPU rendering. Viewport previews remain approximate.'),align='left',wordWrap=True,height=36)
     cmds.setParent(tabs)
     detail = cmds.columnLayout(adjustableColumn=True)
-    for key, label in [('distance_reduction','Distance reduction'),('width_variation','Width variation'),
+    for key, label in [('distance_reduction','Legacy depth width reduction (CPU)'),('width_variation','Width variation'),
                        ('taper','Taper'),('dash_length','Dash length'),('dash_gap','Dash gap (-1 = length)'),
                        ('connect_collinear_dashes','Connect collinear dashes (CPU)')]:
         _field(node, key, label, values)
-    cmds.button(label=tr('Depth reduction (CPU)'),command=lambda *_:_edit_reduction(node))
+    cmds.button(label=tr('Camera depth reduction'),command=lambda *_:_edit_reduction(node))
     _field(node,'profile_direction','Stroke direction (degrees)',values)
     _field(node,'profile_split_angle','Stroke split angle (degrees)',values)
     _field(node,'profile_loop_direction','Loop direction (0=CW, 1=CCW)',values)
     _field(node,'pencil_profile_width','Match Pencil+ profile widths (CPU)',values)
-    for key,label in [('width_profile','Width profile (CPU)'),('alpha_profile','Alpha profile (CPU)')]:
+    for key,label in [('width_profile','Width profile'),('alpha_profile','Alpha profile')]:
         cmds.button(label=tr(label),command=lambda *_,k=key:_edit_profile(node,k))
-    cmds.text(label=tr('Taper and variation are supported by offline rendering.\nVP2 shows constant width per edge.'), align='left')
+    cmds.text(label=tr('Taper and variation apply to CPU rendering.\nStroke width and alpha profiles apply to normal preview and CPU rendering.'), align='left')
     cmds.setParent(tabs)
     cmds.tabLayout(tabs, edit=True, tabLabel=tr([(visible,'Visible Lines'),(hidden,'Hidden Lines'),(detail,'Brush Details')]))
     cmds.tabLayout(tabs,edit=True,selectTabIndex=previous_tab)
@@ -376,7 +376,7 @@ def _nested_profile_fields(node,hidden,feature):
         settings=graph.get_settings(node);parent=settings.get('hidden_style',{}) if hidden else settings
         target=parent.get('feature_brushes',{}).get(feature,{}) if feature else parent
         return target.get(key,[])
-    for key,label in [('width_profile','Width profile (CPU)'),('alpha_profile','Alpha profile (CPU)')]:
+    for key,label in [('width_profile','Width profile'),('alpha_profile','Alpha profile')]:
         def edit(*_,k=key):
             from .profile_editor import open_editor
             return open_editor(node,k,getter=lambda:current(k),setter=lambda p:_nested_setting(node,hidden,feature,k,p))

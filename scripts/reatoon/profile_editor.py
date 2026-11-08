@@ -1,6 +1,6 @@
 """Interactive width/alpha graph editor; independent UI, existing CPU contract."""
 from . import i18n
-_labels={'Flip curve':'곡선 좌우 반전','Symmetrize selected side':'선택한 쪽을 대칭 복제','Copy curve':'곡선 복사','Paste curve':'곡선 붙여넣기','Advanced control-point values':'고급 제어점 수치','Curve position':'곡선 위치','Curve value':'곡선 값','Click the curve to add a point. Drag points or handles. Ctrl-click selects multiple points. Delete removes selected points.':'곡선을 클릭해 점을 추가하고 점·핸들을 드래그하세요. Ctrl 클릭으로 다중 선택하고 Delete로 삭제합니다.','Apply saves the curve; Cancel leaves the scene unchanged. Stroke profiles affect CPU rendering.':'적용하면 곡선을 저장하며 취소하면 장면은 유지됩니다. 획의 선폭·알파 곡선은 CPU 렌더에 적용됩니다.'}
+_labels={'Flip curve':'곡선 좌우 반전','Symmetrize selected side':'선택한 쪽을 대칭 복제','Copy curve':'곡선 복사','Paste curve':'곡선 붙여넣기','Advanced control-point values':'고급 제어점 수치','Curve position':'곡선 위치','Curve value':'곡선 값','Click the curve to add a point. Drag points or handles. Ctrl-click selects multiple points. Delete removes selected points.':'곡선을 클릭해 점을 추가하고 점·핸들을 드래그하세요. Ctrl 클릭으로 다중 선택하고 Delete로 삭제합니다.','Apply saves the curve; Cancel leaves the scene unchanged. Stroke profiles affect normal preview and CPU rendering.':'적용하면 곡선을 저장하며 취소하면 장면은 유지됩니다. 획의 선폭·알파 곡선은 일반 프리뷰와 CPU 렌더에 적용됩니다.'}
 i18n.STRINGS.update(_labels);i18n.ALIASES.update({v:k for k,v in _labels.items()});tr=i18n.tr
 _axis={'X: stroke start (0) to end (1). Y: width or alpha multiplier.':'X: 획의 시작(0)~끝(1), Y: 선폭 또는 알파 배율입니다.','Curve positions must be distinct':'제어점의 X 위치는 서로 달라야 합니다.','Curve coordinates outside range':'제어점 좌표가 허용 범위를 벗어났습니다.','Invalid curve point':'제어점 값이 올바르지 않습니다.'}
 i18n.STRINGS.update(_axis);i18n.ALIASES.update({v:k for k,v in _axis.items()})
@@ -16,7 +16,7 @@ def open_editor(node,key,getter=None,setter=None):
     if key not in ('width_profile','alpha_profile'):raise ValueError('Unknown brush curve')
     pointer=None if cmds.about(batch=True) else OpenMayaUI.MQtUtil.mainWindow()
     parent=shiboken6.wrapInstance(int(pointer),QtWidgets.QWidget) if pointer else None
-    dialog=QtWidgets.QDialog(parent);dialog.setObjectName('reaPencilProfileEditor');dialog.setWindowTitle(tr('Width profile (CPU)' if key=='width_profile' else 'Alpha profile (CPU)'));dialog.resize(640,370)
+    dialog=QtWidgets.QDialog(parent);dialog.setObjectName('reaPencilProfileEditor');dialog.setWindowTitle(tr('Width profile' if key=='width_profile' else 'Alpha profile'));dialog.resize(640,370)
     layout=QtWidgets.QVBoxLayout(dialog);layout.setSpacing(6);toolbar=QtWidgets.QHBoxLayout();layout.addLayout(toolbar)
     source=getter() if getter else line_graph.get_settings(node).get(key,[])
     canvas=CurveCanvas(source);canvas.setToolTip(tr('Click the curve to add a point. Drag points or handles. Ctrl-click selects multiple points. Delete removes selected points.'));dialog.canvas=canvas
@@ -46,7 +46,7 @@ def open_editor(node,key,getter=None,setter=None):
     def show_table(enabled):table.setVisible(enabled);toggle.setArrowType(QtCore.Qt.DownArrow if enabled else QtCore.Qt.RightArrow);dialog.adjustSize()
     toggle.toggled.connect(show_table)
     status=QtWidgets.QLabel();status.setObjectName('curve_status');status.setWordWrap(True);layout.addWidget(status)
-    note=QtWidgets.QLabel(tr('Apply saves the curve; Cancel leaves the scene unchanged. Stroke profiles affect CPU rendering.'));note.setWordWrap(True);layout.addWidget(note)
+    note=QtWidgets.QLabel(tr('Apply saves the curve; Cancel leaves the scene unchanged. Stroke profiles affect normal preview and CPU rendering.'));note.setWordWrap(True);layout.addWidget(note)
     controls=QtWidgets.QHBoxLayout();layout.addLayout(controls);guard=[False];table_error=['']
     def selection():
         enabled=bool(canvas.selected)
