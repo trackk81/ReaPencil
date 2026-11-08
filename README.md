@@ -1,58 +1,38 @@
 # ReaPencil for Maya
 
-Windows x64 / Autodesk Maya 2025용 독립 NPR 라인 플러그인입니다.
+Maya 2025 / Windows x64용 선 렌더링 플러그인입니다. 뷰포트 프리뷰와 최종 CPU 렌더, 라인셋, 독립 브러시, Merge Groups, 렌더 요소와 PNG·SVG·EPS 출력을 지원합니다.
 
-- 선택 가능한 화면 공간 GPU 고속 프리뷰: 리깅 조작용, 라인셋에 등록한 오브젝트·재질에 단일 스타일 적용
-- GPU 실시간 뷰포트: 외곽선, 열린 에지, 하드 에지, 재질 경계, 교차선
-- CPU 최종 렌더, 라인셋, Merge Groups, Render Elements
-- PNG 알파·흑백 마스크 경계선, 내부 구멍, 메시 변형 및 스무스 대응
-- 지원되는 기존 Pencil+ 저장 설정 가져오기. Pencil+ 설치 없이 변환 가능
-- ReaPencil 메뉴에서 GitHub 업데이트 확인·다운로드·설치 예약
+## 0.8.53 업데이트
 
-Pencil+의 전체 기능이나 동일한 렌더 결과를 보장하지 않습니다. PSOFT의 실행 파일, 스크립트, 아이콘, 셰이더는 포함하지 않습니다. Maya SDK 헤더·라이브러리는 저장소에 포함하지 않으며, 네이티브 모듈을 다시 빌드하려면 Maya 2025 SDK와 MSVC가 필요합니다.
+대형 장면에서 하드 엣지를 사용하는 고속 프리뷰와 모드 전환 속도, CPU 렌더 준비·교차선·가림 처리를 개선했습니다. [변경 사항과 실제 Maya 검증 범위](docs/release_053.md)를 확인하세요. 최종 렌더는 CPU입니다.
 
-## 0.8.48 변경
+## 설치
 
-일반 Preview 재질 알파 자동 인식·고해상도 경계 품질·복잡한 구멍 처리를 개선했습니다. 알파 경계 생성·메시 준비를 동일 품질에서 평균12.44초에서6.13초로 줄였습니다(통제 장면, 별도 Maya4회). Fast Preview의 소수점 선폭·스무스 에지와 뷰포트 성능 설정, 독립 브러시·합성·거리 감소 개선을 포함합니다. [전체 변경과 검증 범위](docs/release_048.md)를 확인하세요. 최종 렌더는 CPU입니다.
+[최신 릴리스](https://github.com/trackk81/ReaPencil/releases/latest)의 `ReaPencil-버전-Maya2025-Windows-x64.zip`을 내려받아 전체 압축을 풀고 `INSTALL.cmd`를 실행하세요. GitHub에서 자동 생성한 Source code ZIP은 설치 파일이 아닙니다. 기존 설치본에서는 ReaPencil 메뉴의 업데이트 확인과 설치 예약을 사용할 수 있습니다.
 
-## 처음 설치
-
-[Releases](https://github.com/trackk81/ReaPencil/releases/latest)에서 `ReaPencil-버전-Maya2025-Windows-x64.zip`을 다운로드하세요. GitHub의 자동 생성 Source code ZIP은 설치 배포본이 아닙니다.
-
-1. ZIP 전체를 압축 해제하고 Maya를 종료합니다.
-2. `INSTALL.cmd`를 실행합니다. CPU 가속 wheel이 포함되어 있어 초기 설치는 오프라인으로 가능합니다.
-3. Maya 2025 Script Editor의 Python 탭에서 실행합니다.
+설치 후 Maya를 다시 실행합니다. 필요한 경우 Script Editor의 Python 탭에서 실행하세요.
 
 ```python
 import reapencil_start
 reapencil_start.launch()
 ```
 
-Plug-in Manager의 기본 파일은 **reaPencil.py**입니다. Maya가 허용 여부를 물으면 설치한 파일과 경로를 직접 확인하세요. GPU 화면 표시용 **reaPencilDraw084.mll**은 메인 플러그인이 자동으로 불러오는 보조 모듈입니다.
+Plug-in Manager의 주 플러그인은 `reaPencil.py`입니다. 보안 경고가 나오면 설치 위치와 플러그인 이름을 확인한 뒤 허용하세요.
 
-## 고속 프리뷰
+## 뷰포트와 렌더
 
-**뷰포트 Renderer → ReaPencil Fast Preview**를 선택합니다. 정밀 표시는 **Renderer → ReaPencil Preview**, 끄기는 **Renderer → Viewport 2.0**입니다. **Renderer 목록의 ReaPencil Fast Preview 오른쪽 옵션 버튼**에서 굵기·색상을 조절합니다. ReaPencil Preview 오른쪽 옵션 버튼은 스무스 선·교차선 등 뷰포트 성능 설정을 엽니다. 라인 스타일은 Line Window에서 편집합니다. 라인셋의 오브젝트·재질 대상을 반영합니다. 화면 깊이 기반의 교차선과 브러시 표현은 근사이며, 정밀 모드와 동일한 결과를 보장하지 않습니다. 기존 정밀 표시로 돌아가려면 **Renderer → ReaPencil Preview**를 선택하세요. 최종 렌더는 CPU 그대로입니다.
+뷰포트 **Renderer → ReaPencil Preview** 또는 **ReaPencil Fast Preview**를 선택합니다. 오른쪽 옵션 버튼에서 뷰포트 성능이나 고속 프리뷰 설정을 바꿉니다. 선 종류·브러시·오브젝트·재질 대상은 Line Window에서 편집합니다. 고속 프리뷰는 라인셋에 등록된 오브젝트나 재질에 적용되며, 정확한 최종 결과는 CPU 렌더로 확인합니다.
 
-이 옵션은 Viewport 2.0 OpenGL Core Profile을 사용하며 **reaPencilFast146.mll**을 자동으로 불러옵니다. 리깅 자체가 느리면 프리뷰를 바꿔도 그 평가 비용은 남습니다.
+GPU 표시는 Viewport 2.0 OpenGL Core Profile과 OpenCL fp64 지원이 필요합니다. CUDA Toolkit은 필요하지 않습니다. 배포 대상은 Maya 2025 / Windows x64이며 CPU 의존성 wheel을 포함합니다.
 
-## 이후 업데이트
+## 호환과 한계
 
-ReaPencil → **업데이트 확인…** → **다운로드 및 설치 예약**을 선택합니다. 다운로드 검증 후, 작업을 저장하고 모든 Maya를 직접 종료하세요. 설치 완료 알림이 나타나면 Maya를 다시 실행합니다. 다른 PC에서도 GitHub 로그인 없이 공개 배포본으로 업데이트할 수 있습니다.
+지원되는 Pencil+ 장면 설정을 읽어 이관할 수 있으며, Pencil+가 설치되지 않은 환경의 지원되는 저장 속성도 처리합니다. 원본 전체 기능이나 모든 브러시·폐곡선·뷰포트 표현의 일치를 보장하지 않습니다. 지원되지 않는 항목은 이관 검사 결과를 확인하세요.
 
-현재 지원 플랫폼은 Windows x64 / Maya 2025입니다. 뷰포트에는 그래픽 드라이버의 OpenCL fp64 지원이 필요합니다. 최종 렌더는 CPU이며 CUDA Toolkit은 필요하지 않습니다. Maya 기본 NumPy를 교체하지 않습니다.
+PSOFT 원본 플러그인·바이너리·셰이더·라이선스 코드는 배포하지 않습니다. [외부 구성요소 고지](THIRD_PARTY_NOTICES.txt)를 확인하세요.
 
-설치본의 `CHECK.cmd`는 별도 프로세스에서 작은 테스트 장면으로 GPU·CPU 경로를 검사합니다. 자세한 업데이트 절차는 [docs/updates.md](docs/updates.md)를 확인하세요.
+## 소스와 빌드
 
-## UI language and anti-aliasing
+이 태그의 런타임 파일은 릴리스 ZIP 및 검증한 로컬 0.8.53 설치본과 일치합니다. [런타임 해시 목록](docs/runtime_053_sha256.json)을 제공합니다. 사용자 장면과 내부 검증 데이터는 포함하지 않습니다.
 
-Choose English or 한국어 in ReaPencil → ReaPencil Settings. The choice is saved in Maya preferences. The option button beside ReaPencil Fast Preview includes Off / FXAA anti-aliasing (FXAA is the default). Final CPU rendering uses the existing render settings.
-
-## Authored edge overlays
-
-Fast Preview options include Hard edges and Authored crease edges. Crease edges use Maya edge crease weights greater than zero, independent of face angle. Both switches are off by default and are saved with the preview preferences. The optional overlay reads deformed positions only for targeted meshes containing marked edges; its cost depends on edge and deformer counts. Line-set object/material targets, visibility, isolate and depth occlusion remain in effect.
-
-
-## 소스와 배포본
-
-이 태그의 runtime 파일은 검증한0.8.48 배포 ZIP과 일치합니다. CPU brush 소스는 배포 DLL125의 빌드 입력이며, Fast Preview 소스는 배포 DLL146의 빌드 입력입니다. 미설치 CPU 실험 코드는 포함하지 않습니다. 과거 변경 기록의 “로컬 후보” 표기는 당시 검증 상태이며, 현재 배포 범위는0.8.48 변경 사항을 기준으로 합니다.
+네이티브 Maya 모듈을 다시 빌드하려면 Maya 2025 SDK와 MSVC가 필요합니다. 새 고속 프리뷰는 `tools/build_fast159.ps1`, CPU 선 커널은 `tools/build_segments159.ps1`로 빌드합니다. 기존 CPU·브러시·일반 프리뷰 빌드 도구도 유지합니다.

@@ -92,7 +92,7 @@ def _settings(width=None, height=None):
     settings['height'] = int(height if height and height > 0 else cmds.getAttr('defaultResolution.height'))
     aspect = float(_attribute('defaultResolution.pixelAspect', 1.0))
     if not math.isclose(aspect, 1., abs_tol=1e-6):
-        raise ValueError('ReaPencil requires square pixels, not a square image. Pixel Aspect Ratio is %.6g. In the ReaPencil Render Settings tab click "Use square pixels"; this keeps Width/Height and corrects the device aspect ratio.' % aspect)
+        raise ValueError('ReaPencil requires square pixels, not a square image. Pixel Aspect Ratio is %.6g. In Render Settings > Common > Image Size, set Pixel Aspect Ratio to 1 and Device Aspect Ratio to Width / Height.' % aspect)
     if int(_attribute('defaultRenderGlobals.imageFormat', 32)) != 32:
         cmds.warning('ReaPencil writes PNG image passes; the Maya image-format setting is not used.')
     return maya_scene.validate_settings(settings)
@@ -270,32 +270,20 @@ def _resolution_field(attribute,label):
 
 def _create_globals_tab():
     """ReaPencil-specific tab; Maya owns the standard Common tab hierarchy."""
-    cmds.columnLayout(adjustableColumn=True)
-    cmds.text(label='ReaPencil / 레아펜슬 — PNG + SVG + EPS', align='left')
-    cmds.text(label='CPU reference renderer. Full frame only; no IPR or region render.', align='left')
-    for attribute, label in [('defaultRenderGlobals.imageFilePrefix', 'File prefix'),
-                             ('defaultResolution.width', 'Width'),
-                             ('defaultResolution.height', 'Height'),
-                             ('defaultResolution.pixelAspect', 'Pixel aspect (square = 1)'),
-                             ('defaultRenderGlobals.animation', 'Animation'),
-                             ('defaultRenderGlobals.startFrame', 'Start frame'),
-                             ('defaultRenderGlobals.endFrame', 'End frame'),
-                             ('defaultRenderGlobals.byFrameStep', 'Frame step'),
-                             ('defaultRenderGlobals.extensionPadding', 'Frame padding'),
-                             ('defaultRenderGlobals.skipExistingFrames', 'Skip existing frames')]:
-        if attribute in ('defaultResolution.width','defaultResolution.height'):
-            _resolution_field(attribute,label)
-        else:
-            cmds.attrControlGrp(attribute=attribute,label=label)
-        if attribute=='defaultResolution.pixelAspect':
-            cmds.button(label='Use square pixels',command=_use_square_pixels,
-                        annotation='Keep Width/Height and set Pixel Aspect Ratio to 1.')
+    from . import i18n,line_editor
+    def label(en,ko):return en if i18n.language()=='en' else ko
+    parent=cmds.setParent(query=True)
+    column=cmds.columnLayout(adjustableColumn=True,rowSpacing=10)
+    cmds.text(label='ReaPencil — PNG + SVG + EPS', align='left')
+    cmds.text(label=label('Set output files, image size, cameras and frame range in the Common tab.',
+                         '출력 파일, 해상도, 카메라, 프레임 범위는 Common 탭에서 설정하세요.'),
+              align='left',wordWrap=True,height=40)
     cmds.separator(height=10, style='in')
-    cmds.text(label='Renderable cameras (Batch renders all enabled cameras)', align='left')
-    for camera in cmds.ls(type='camera', long=True) or []:
-        cmds.attrControlGrp(attribute=camera + '.renderable', label=camera.rsplit('|', 1)[-1])
-    cmds.button(label='Open ReaPencil line / material settings', command=lambda *_: _open_options())
-    cmds.setParent('..')
+    cmds.button(label=label('Open Line Window','라인 창 열기'),command=lambda *_:line_editor.show())
+    cmds.button(label=label('ReaPencil render options','ReaPencil 렌더 옵션'),command=lambda *_:_open_options())
+    cmds.setParent(parent)
+    if cmds.formLayout(parent,exists=True):
+        cmds.formLayout(parent,edit=True,attachForm=[(column,'top',8),(column,'left',8),(column,'right',8)])
 
 
 def _open_options():

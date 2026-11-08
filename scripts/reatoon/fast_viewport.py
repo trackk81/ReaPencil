@@ -29,7 +29,7 @@ def register():
         raise RuntimeError('Fast preview requires Viewport 2.0 OpenGL Core Profile; the precise viewport remains available.')
     if _library is None:
         root=Path(__file__).resolve().parents[2]
-        path=root/'plug-ins'/str(cmds.about(version=True))/'reaPencilFast146.mll'
+        path=root/'plug-ins'/str(cmds.about(version=True))/'reaPencilFast159.mll'
         if not path.is_file():raise RuntimeError('Fast preview module is unavailable for this Maya version')
         _plugin=cmds.loadPlugin(str(path),quiet=True)[0]
         cmds.pluginInfo(_plugin,e=True,autoload=False)
@@ -48,17 +48,28 @@ def enable():
     register()
     configure(**preferences())
     was_precise=bool(cmds.ls(type=viewport.NODE_NAME))
-    viewport.disable()
     before=_library.rp_fast_frames()
+    precise_panels={}
     try:
+        # Detach precise panels before deleting their helper. Its renderer can
+        # otherwise recreate the helper during disable()'s forced refresh,
+        # rebuilding the whole scene immediately before switching to Fast.
+        from .preview_renderers import NAME as PRECISE_NAME
         for panel in cmds.getPanel(type='modelPanel') or []:
-            previous=cmds.modelEditor(panel,q=True,rendererOverrideName=True)
+            if cmds.modelEditor(panel,q=True,rendererOverrideName=True)==PRECISE_NAME:
+                precise_panels[panel]=PRECISE_NAME
+                cmds.modelEditor(panel,e=True,rendererOverrideName='')
+        viewport.disable()
+        for panel in cmds.getPanel(type='modelPanel') or []:
+            previous=precise_panels.get(panel,cmds.modelEditor(panel,q=True,rendererOverrideName=True))
             if previous!=NAME:_panels[panel]=previous
             cmds.modelEditor(panel,e=True,rendererOverrideName=NAME)
         cmds.refresh(force=True)
         if _library.rp_fast_frames()==before:raise RuntimeError('Fast preview did not draw; check the graphics/shader messages in Script Editor.')
     except Exception:
         disable()
+        for panel,previous in precise_panels.items():
+            if cmds.modelPanel(panel,exists=True):cmds.modelEditor(panel,e=True,rendererOverrideName=previous)
         if was_precise:viewport.enable()
         raise
     return status()

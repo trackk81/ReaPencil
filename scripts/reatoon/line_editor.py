@@ -302,9 +302,9 @@ def _set_changed(ctx):
     for key in ('objects', 'shaders'):
         if targets.get(key):
             cmds.textScrollList(ctx[key], edit=True, append=targets[key])
-    values = dict(maya_scene.DEFAULT_SETTINGS)
+    values = maya_scene.load_settings()
     values.update(graph.get_settings(ctx['node']))
-    values.update(graph.get_settings(node))
+    values.update(graph.resolved_settings(node))
     name_control=cmds.textFieldGrp(label=tr('Line Set Name'), text=node)
     ctx['set_name']=name_control
     cmds.textFieldGrp(name_control,edit=True,

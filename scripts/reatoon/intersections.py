@@ -23,11 +23,21 @@ from .robust_predicates import strictly_separated, orient3d_value
 
 class IntersectionBatches:
     """Ordered native rows; legacy callers can still iterate exact records."""
-    def __init__(self):self.batches=[];self.count=0
+    def __init__(self):self.batches=[];self.count=0;self._pending=[];self._pair=None
     def add(self,i,j,rows):
         if len(rows):self.batches.append((i,j,rows));self.count+=len(rows)
+    def append_record(self,i,j,segment,ti,tj):
+        # Keep scalar fallback compact too, with bounded Python scratch.
+        if self._pair!=(i,j):self.flush();self._pair=(i,j)
+        self._pending.append([*segment[0],*segment[1],ti,tj]);self.count+=1
+        if len(self._pending)>=4096:self.flush()
+    def flush(self):
+        if self._pending:
+            self.batches.append((*self._pair,np.asarray(self._pending,np.float64)))
+            self._pending=[]
     def __len__(self):return self.count
     def __iter__(self):
+        self.flush()
         for i,j,rows in self.batches:
             for row in rows:
                 yield dict(a=row[:3],b=row[3:6],mesh_indices=[i,j],
@@ -70,14 +80,21 @@ def find_render_intersections(meshes, diagnostics=None, **kwargs):
     """Retry complete CPU queries when output fills, within a bounded budget.
 
     Keep the explicit limits of find_intersections unchanged for its callers.
-    A conservative 1 KiB per Python segment record reserves at most 512 MiB
-    for render intersection records. Candidate work is bounded separately.
+    Packed rows contain eight float64 values, versus a conservative 1 KiB
+    per dictionary record. Both retain the existing 512 MiB record budget.
+    Candidate work is bounded separately.
     """
     # This is a work guard, not a preallocated array. Scale its starting value
     # with supplied geometry to avoid repeating a completed large-scene query.
     triangle_count=sum(len(mesh.get('triangles',mesh.get('faces',[]))) for mesh in meshes)
-    segment_limit=min(524_288,max(200_000,triangle_count//8))
-    candidate_limit = 2_000_000
+    packed=kwargs.get('array_output',False) and not kwargs.get('merge_segments',True)
+    record_bytes=8*np.dtype(np.float64).itemsize if packed else 1024
+    maximum_segments=(512*1024*1024)//record_bytes
+    segment_limit=min(maximum_segments,max(200_000,triangle_count//8))
+    # As with packed output, this is a work counter, not allocated storage.
+    # A city with millions of triangles otherwise completes almost all queries
+    # before restarting at the small-scene default. Keep the same final guard.
+    candidate_limit=min(32_000_000,max(2_000_000,triangle_count))
     retries=0
     while True:
         attempt={}
@@ -86,11 +103,14 @@ def find_render_intersections(meshes, diagnostics=None, **kwargs):
                 max_candidates=candidate_limit,diagnostics=attempt,**kwargs)
             attempt['budget_retries']=retries
             attempt['segment_capacity']=segment_limit
+            attempt['record_bytes']=record_bytes
+            attempt['record_budget_bytes']=512*1024*1024
+            attempt['record_storage_bytes']=len(result)*record_bytes
             if diagnostics is not None:diagnostics.update(attempt)
             return result
         except IntersectionLimitError as error:
-            if 'segment' in str(error).lower() and segment_limit<524_288:
-                segment_limit=min(524_288,segment_limit*2)
+            if 'segment' in str(error).lower() and segment_limit<maximum_segments:
+                segment_limit=min(maximum_segments,segment_limit*2)
             elif 'candidate' in str(error).lower() and candidate_limit<32_000_000:
                 candidate_limit*=2
             else:
@@ -356,12 +376,30 @@ def _merge_segments(records, eps):
     return output
 
 
+def _mesh_pairs(data,self_intersections,eps):
+    """Same ordered AABB pairs; compare rows in bulk with O(n) scratch."""
+    active=[i for i,item in enumerate(data) if item['root'] is not None and
+            ('active_triangles' not in item or np.any(item['active_triangles']))]
+    if not active:return []
+    def bounds(item):
+        mask=item.get('active_triangles')
+        if mask is None or np.all(mask):return item['root'].low,item['root'].high
+        enabled=np.asarray(mask,dtype=np.bool_)
+        return item['lows'][enabled].min(axis=0),item['highs'][enabled].max(axis=0)
+    boxes=[bounds(data[i]) for i in active]
+    lows=np.asarray([b[0] for b in boxes]);expanded_highs=np.asarray([b[1] for b in boxes])+eps
+    pairs=[]
+    for row,i in enumerate(active):
+        start=row if self_intersections else row+1
+        overlap=(np.all(lows[row]<=expanded_highs[start:],axis=1)&
+                 np.all(lows[start:]<=expanded_highs[row],axis=1))
+        pairs.extend((i,active[start+int(j)]) for j in np.flatnonzero(overlap))
+    return pairs
+
+
 def _native_records(data,native,self_intersections,eps,max_candidates,max_segments,counts,workers,array_output=False):
     """Bounded native queries; ordered consumption preserves deterministic output."""
-    pairs=[(i,j) for i,a in enumerate(data) if a['root'] is not None
-           for j in range(i if self_intersections else i+1,len(data))
-           if data[j]['root'] is not None and _overlap(a['root'].low,a['root'].high,
-               data[j]['root'].low,data[j]['root'].high,eps)]
+    pairs=_mesh_pairs(data,self_intersections,eps)
     mask_keys=[hashlib.sha256(item['active_triangles'].tobytes()).digest() if 'active_triangles' in item else None for item in data]
     def query(pair):
         i,j=pair;a,b=data[i],data[j]
@@ -372,32 +410,54 @@ def _native_records(data,native,self_intersections,eps,max_candidates,max_segmen
             output=(native(*arguments,a['active_triangles'],b['active_triangles'],a['active_nodes'],b['active_nodes'])
                     if 'active_triangles' in a else native(*arguments))
             return np.asarray(output[0],np.float64).reshape(-1,8),output[1],output[2]
-        key=((a['cache_token'],b['cache_token'],i==j,eps,max_candidates,max_segments,mask_keys[i],mask_keys[j])
+        # Successful complete queries are capacity-independent; every result
+        # still passes the global guards below, even after a smaller request.
+        key=((a['cache_token'],b['cache_token'],i==j,eps,mask_keys[i],mask_keys[j])
              if 'cache_token' in a and 'cache_token' in b else None)
         return _query_cached(key,compute)
     records=IntersectionBatches() if array_output else []
+    pair_sizes=[int(np.count_nonzero(item['active_triangles'])) if 'active_triangles' in item
+                else len(item['positions']) for item in data]
+    def batches():
+        # Small mesh pairs cost less than scheduling one Python Future. Keep
+        # contiguous ordering and bound each group's worst-case triangle-pair
+        # output; a large query remains alone with its original explicit guard.
+        batch=[];cost=0
+        for pair in pairs:
+            i,j=pair
+            potential=min(max_segments,pair_sizes[i]*pair_sizes[j])
+            if batch and (len(batch)>=32 or cost+potential>65536):
+                yield batch;batch=[];cost=0
+            batch.append(pair);cost+=potential
+        if batch:yield batch
+    def query_batch(batch):
+        results=[]
+        for pair in batch:
+            output=query(pair);results.append((pair,output))
+            if output[2]:break
+        return results
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        source=iter(pairs)
+        source=iter(batches())
         pending=deque()
         for _ in range(workers*2):
-            pair=next(source,None)
-            if pair is None:break
-            pending.append((pair,executor.submit(query,pair)))
+            batch=next(source,None)
+            if batch is None:break
+            pending.append(executor.submit(query_batch,batch))
         while pending:
-            (i,j),future=pending.popleft()
-            segments,counters,failure=future.result()
-            next_pair=next(source,None)
-            if next_pair is not None:pending.append((next_pair,executor.submit(query,next_pair)))
-            for name,value in zip(('node_pairs','aabb_pairs','adjacent_skipped','narrow_pairs','plane_rejected',
-                'degenerate_pairs','coplanar_pairs','candidate_pairs','point_contacts'),counters):
-                counts[name]+=int(value)
-            if failure or counts['candidate_pairs']>max_candidates or len(records)+len(segments)>max_segments:
-                kind='candidate' if failure==1 or counts['candidate_pairs']>max_candidates else 'segment'
-                raise IntersectionLimitError('Intersection %s budget exceeded; no partial lines returned'%kind)
-            if array_output:records.add(i,j,segments)
-            else:
-                records.extend(dict(a=row[:3],b=row[3:6],mesh_indices=[i,j],triangle_pairs=[[int(row[6]),int(row[7])]])
-                               for row in segments.tolist())
+            output=pending.popleft().result()
+            next_batch=next(source,None)
+            if next_batch is not None:pending.append(executor.submit(query_batch,next_batch))
+            for (i,j),(segments,counters,failure) in output:
+                for name,value in zip(('node_pairs','aabb_pairs','adjacent_skipped','narrow_pairs','plane_rejected',
+                    'degenerate_pairs','coplanar_pairs','candidate_pairs','point_contacts'),counters):
+                    counts[name]+=int(value)
+                if failure or counts['candidate_pairs']>max_candidates or len(records)+len(segments)>max_segments:
+                    kind='candidate' if failure==1 or counts['candidate_pairs']>max_candidates else 'segment'
+                    raise IntersectionLimitError('Intersection %s budget exceeded; no partial lines returned'%kind)
+                if array_output:records.add(i,j,segments)
+                else:
+                    records.extend(dict(a=row[:3],b=row[3:6],mesh_indices=[i,j],triangle_pairs=[[int(row[6]),int(row[7])]])
+                                   for row in segments.tolist())
     return records
 
 
@@ -463,7 +523,7 @@ def find_intersections(meshes, self_intersections=False, tolerance=1e-7,
     if triangle_masks is not None:
         counts['triangle_masking']=dict(active=sum(int(np.count_nonzero(item['active_triangles'])) for item in data),
                                         total=triangle_count,preserves_original_bvh=True)
-    records = []
+    records = IntersectionBatches() if array_output and not merge_segments else []
     if native is not None:
         try:
             records=_native_records(data,native,self_intersections,eps,max_candidates,max_segments,counts,workers,array_output and not merge_segments)
@@ -475,7 +535,8 @@ def find_intersections(meshes, self_intersections=False, tolerance=1e-7,
                 raise
             fallback_stats={}
             result=find_intersections(meshes,self_intersections,tolerance,max_candidates,max_segments,
-                fallback_stats,backend='python',merge_segments=merge_segments,triangle_masks=triangle_masks)
+                fallback_stats,backend='python',merge_segments=merge_segments,triangle_masks=triangle_masks,
+                array_output=array_output)
             fallback_stats['fallback_reason']='Native execution unavailable: %s'%error
             fallback_stats['timings']['total_seconds']=time.perf_counter()-started
             if diagnostics is not None:diagnostics.update(fallback_stats)
@@ -530,10 +591,12 @@ def find_intersections(meshes, self_intersections=False, tolerance=1e-7,
                 elif kind == "point-contact":
                     counts["point_contacts"] += 1
                 if segment is not None:
-                    records.append(dict(a=segment[0].tolist(), b=segment[1].tolist(),
-                                        mesh_indices=[i, j], triangle_pairs=[[ti, tj]]))
+                    if isinstance(records,IntersectionBatches):records.append_record(i,j,segment,ti,tj)
+                    else:records.append(dict(a=segment[0].tolist(), b=segment[1].tolist(),
+                                             mesh_indices=[i, j], triangle_pairs=[[ti, tj]]))
                     if len(records) > max_segments:
                         raise IntersectionLimitError("Intersection segment budget exceeded; reduce mesh detail or raise max_segments explicitly")
+    if isinstance(records,IntersectionBatches):records.flush()
     counts["raw_segments"] = len(records)
     traversed_at = time.perf_counter()
     if merge_segments:

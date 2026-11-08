@@ -56,10 +56,20 @@ def render_segments(segments,camera,depth,depth_planes,visible,hidden,ss,
             visibility_stats+=counters
             records.extend((int(ids[i]),ax,ay,bx,by) for i,ax,ay,bx,by in rows);record_hidden.extend([is_hidden]*len(rows))
     else:
+        raw_rows=backend=='native-cpu-segments' and not collect_vectors
         records=render(points,widths,biases,colors,only,enabled,depth,depth_planes,visible,
                        int(ss),bool(camera['ortho']),float(camera['span']),float(camera['focal']),
                        float(camera['near']),float(camera['far']),visibility,
-                       np.asarray(camera['eye']),np.linalg.inv(camera['basis']).T,visibility_stats)
+                       np.asarray(camera['eye']),np.linalg.inv(camera['basis']).T,visibility_stats,
+                       **({'raw_rows':True} if raw_rows else {}))
+        if raw_rows:
+            # PNG-only renders need the count, not hundreds of thousands of
+            # Python vector tuples. The native records and pixels are intact.
+            indices=records[:,0].astype(np.intp)
+            visible_count=int(np.count_nonzero(~only[indices]))
+            return dict(vectors=[],visible_segments=visible_count,hidden_segments=0,
+                        classified_edges=count,backend=backend,
+                        visibility_refinement=dict(checked_samples=int(visibility_stats[0]),hidden_samples=int(visibility_stats[1])))
         record_hidden=[False]*len(records)
     vectors=[]
     visible_count=hidden_count=0

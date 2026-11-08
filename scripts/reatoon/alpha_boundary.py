@@ -62,8 +62,12 @@ def _triangulate_contours(loops):
     return tris
 
 
-def configuration(shape):
-    if not cmds.attributeQuery(ATTRIBUTE,node=shape,exists=True):return None
+def configuration(shape,dependency_node=None):
+    # Export already holds the evaluated function set. Avoid a command-layer
+    # node lookup on every opaque mesh while preserving live alpha settings.
+    exists=(dependency_node.hasAttribute(ATTRIBUTE) if dependency_node is not None else
+            cmds.attributeQuery(ATTRIBUTE,node=shape,exists=True))
+    if not exists:return None
     value=cmds.getAttr(shape+'.'+ATTRIBUTE)
     data=json.loads(value) if value else None
     if not data or not data.get('enabled',True):return None
@@ -145,7 +149,10 @@ def _source(plug,inverted=False):
 
 def material_sources(shape):
     from .maya_scene import _dag
-    path=_dag(shape);engines,ids=om.MFnMesh(path).getConnectedShaders(path.instanceNumber());sources={}
+    from .mesh_surface import mesh_function
+    path=_dag(shape);fn=mesh_function(path)
+    if fn is None:return {}
+    engines,ids=fn.getConnectedShaders(path.instanceNumber());sources={}
     for index,sg in enumerate(engines):
         shaders=cmds.listConnections(om.MFnDependencyNode(sg).name()+'.surfaceShader',s=True,d=False) or []
         if not shaders:continue

@@ -182,6 +182,7 @@ def _watch_scene():
     """Watch evaluated geometry, its ancestors and persistent style nodes."""
     global _watchers_stale
     from . import maya_scene
+    from .mesh_surface import mesh_function,surface_input_changed
     _remove_callbacks(_node_callbacks)
     names = set()
     for mesh in cmds.ls(type="mesh", long=True, allPaths=True) or []:
@@ -232,6 +233,8 @@ def _watch_scene():
             _node_callbacks.append(om.MNodeMessage.addAttributeChangedCallback(obj, _attribute_changed))
             if obj.hasFn(om.MFn.kMesh):
                 _node_callbacks.append(om.MPolyMessage.addPolyTopologyChangedCallback(obj, _scene_changed))
+                if mesh_function(om.MDagPath.getAPathTo(obj)) is None:
+                    _node_callbacks.append(om.MNodeMessage.addAttributeChangedCallback(obj,surface_input_changed))
             if obj.hasFn(om.MFn.kSet):
                 _node_callbacks.append(om.MObjectSetMessage.addSetMembersModifiedCallback(obj,_targets_changed))
         except RuntimeError:

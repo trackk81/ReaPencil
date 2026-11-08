@@ -15,6 +15,33 @@ _fallback_generation=-1
 _fallback_reason=''
 _device_error=None
 _last_api=None
+_deferred_entries=[]
+_deferred_camera_key=None
+_fixed_group_count=0
+_fixed_segments=0
+_fixed_batches=0
+_group_segment_counts={}
+MAX_RETAINED_GROUP_SEGMENTS=262144
+
+
+def _begin_pass():
+    _library.rt_begin_pass();_group_segment_counts.clear()
+
+
+def _add_bounded(points,parameters,style_id,width,color):
+    """Keep every segment while bounding native VP2 draw-item vertex counts.
+
+    Maya can silently omit oversized retained items. Bound both a single large
+    submission and accumulation of many small meshes into the same style item.
+    Splitting creates ordered draw items; it does not simplify or discard lines.
+    """
+    for first in range(0,len(points),MAX_RETAINED_GROUP_SEGMENTS):
+        p=points[first:first+MAX_RETAINED_GROUP_SEGMENTS]
+        q=parameters[first:first+MAX_RETAINED_GROUP_SEGMENTS]
+        if _group_segment_counts.get(style_id,0)+len(p)>MAX_RETAINED_GROUP_SEGMENTS:_begin_pass()
+        if not _library.rt_add_retained(p.ctypes.data,q.ctypes.data,len(p),width,color):
+            raise retained_geometry.UnsupportedRetained('Retained GPU buffer transfer failed')
+        _group_segment_counts[style_id]=_group_segment_counts.get(style_id,0)+len(p)
 
 def bind(lib):
     global _library,_mode,_key,_device_error,_fallback_generation
@@ -43,11 +70,12 @@ def _evaluate_edges(mesh,data):
     _library.rt_edge_positions(v.ctypes.data,data['topology'].ctypes.data,len(data['owners']),data['points'].ctypes.data,data['parameters'].ctypes.data)
 
 def _switch(mode):
-    global _mode,_key,_passes,_geometry_style_key
+    global _mode,_key,_passes,_geometry_style_key,_deferred_entries,_deferred_camera_key
     if _mode!=mode:
         if vp._gpu_scene is not None:vp._gpu_scene.close()
         vp._gpu_scene=None;vp._gpu_rebuild=True;vp._native_last_groups=None
         _key=None;_passes=None;_geometry_style_key=None;_mode=mode
+        _deferred_entries=[];_deferred_camera_key=None
     _library.rt_mode(mode=='retained')
 
 def _fallback(camera_name,aspect,reason,destination=''):
@@ -78,11 +106,48 @@ def prepare(camera_name,aspect,draw_api=4,destination=''):
     except retained_geometry.UnsupportedRetained as error:
         _fallback(camera_name,aspect,str(error),destination)
 
+def _draw_deferred(camera):
+    """Upload only exceptional silhouette edges; retain all ordinary GPU data."""
+    total=batches=0
+    _begin_pass()
+    for data,styles,offset,mesh_id in _deferred_entries:
+        visible=retained_geometry.deferred_camera_mask(data,camera)
+        for owner in np.unique(data['owners'][visible]):
+            selected=visible&(data['owners']==owner)
+            points=np.ascontiguousarray(data['points'][selected],np.float64)
+            parameters=np.zeros((len(points),2,4),np.float32)
+            parameters[:,0,:3]=data['normal0'][selected];parameters[:,1,:3]=data['normal1'][selected]
+            parameters[:,:,3]=2*(mesh_id+1)
+            style=styles[int(owner)];width=float(style.get('line_width',1.5))
+            color=(c.c_float*3)(*style.get('line_color',[.04,.04,.07]))
+            _library.rt_style(offset+int(owner),width,color)
+            _add_bounded(points,parameters,offset+int(owner),width,color)
+            total+=len(points);batches+=1
+    return total,batches
+
+
 def _prepare(camera_name,aspect):
-    global _key,_passes,_geometry_style_key
-    key=(vp._generation,vp._gpu_rebuild,vp._gpu_graph_dirty,vp._gpu_style_dirty)
-    if _key==key:return
+    global _key,_passes,_geometry_style_key,_deferred_entries,_deferred_camera_key
+    global _fixed_group_count,_fixed_segments,_fixed_batches
     started=time.perf_counter()
+    key=(vp._generation,vp._gpu_rebuild,vp._gpu_graph_dirty,vp._gpu_style_dirty)
+    if _key==key and not _deferred_entries:
+        vp._last_report.update(prepare_ms=(time.perf_counter()-started)*1000,
+                               geometry_updated=False,retained_geometry_reused=True)
+        return
+    path=maya_scene._dag(camera_name);camera=vp._camera_data(path,aspect)
+    camera_key=(tuple(camera['position']),tuple(camera['target']),camera['projection'])
+    if _key==key:
+        if camera_key==_deferred_camera_key:
+            vp._last_report.update(prepare_ms=(time.perf_counter()-started)*1000,
+                                   geometry_updated=False,retained_geometry_reused=True)
+            return
+        _library.rt_begin();_library.rt_reuse(0,_fixed_group_count)
+        count,batches=_draw_deferred(camera);_library.rt_end();_deferred_camera_key=camera_key
+        vp._last_report.update(segments=_fixed_segments+count,submitted_segments=_fixed_segments+count,
+            batches=_fixed_batches+batches,exceptional_visible_segments=count,retained_geometry_reused=True,
+            prepare_ms=(time.perf_counter()-started)*1000)
+        return
     lines=line_graph.list_lines()
     nodes=cmds.ls(type=vp.NODE_NAME) or []
     vp._graph_mode|=bool(lines) or any(cmds.getAttr(n+'.lineGraphMode') for n in nodes)
@@ -93,7 +158,6 @@ def _prepare(camera_name,aspect):
         _library.rt_begin();_library.rt_end();_key=key
         vp._last_report=dict(state='ready',backend='retained_gpu',segments=0,submitted_segments=0,reason='empty_line_graph')
         return
-    path=maya_scene._dag(camera_name);camera=vp._camera_data(path,aspect)
     if vp._watchers_stale:vp._watch_scene()
     from . import preview_settings
     settings=preview_settings.load()
@@ -139,6 +203,8 @@ def _prepare(camera_name,aspect):
             _library.rt_style(style_offset+i,float(style.get('line_width',1.5)),color)
         style_offset+=len(item['styles'])
     if not rebuilt and not changed and not graph_dirty and geometry_style_key==_geometry_style_key:
+        styles_by_offset={p['retained_style_offset']:p['styles'] for p in _passes}
+        _deferred_entries=[(d,styles_by_offset[o],o,i) for d,_,o,i in _deferred_entries]
         _key=(vp._generation,vp._gpu_rebuild,vp._gpu_graph_dirty,vp._gpu_style_dirty)
         vp._last_report.update(geometry_generation=vp._generation,geometry_updated=False,retained_geometry_reused=True,
                               prepare_ms=(time.perf_counter()-started)*1000)
@@ -147,6 +213,7 @@ def _prepare(camera_name,aspect):
     dirty=set(getattr(live,'changed_meshes',[]))
     reuse=partial and changed and not rebuilt and not graph_dirty and geometry_style_key==_geometry_style_key
     _library.rt_begin();total=0;edge_total=0;cross_total=0;batch_count=0;pass_reports=[]
+    _deferred_entries=[]
     def submit(points,parameters,styles,owners):
         nonlocal total,batch_count
         unique=np.unique(owners)
@@ -157,12 +224,11 @@ def _prepare(camera_name,aspect):
             q=np.ascontiguousarray(parameters if len(unique)==1 else parameters[selected],np.float32)
             color=(c.c_float*3)(*style.get('line_color',[.04,.04,.07]))
             _library.rt_style(item['retained_style_offset']+int(owner),float(style.get('line_width',1.5)),color)
-            if not _library.rt_add_retained(c.c_void_p(p.ctypes.data),c.c_void_p(q.ctypes.data),len(p),float(style.get('line_width',1.5)),color):
-                raise retained_geometry.UnsupportedRetained('Retained GPU buffer transfer failed')
+            _add_bounded(p,q,item['retained_style_offset']+int(owner),float(style.get('line_width',1.5)),color)
             total+=len(p);batch_count+=1
     if not live.empty:
         for item in _passes:
-            _library.rt_begin_pass()
+            _begin_pass()
             styles=item['styles']
             if not styles:continue
             gpu=live.gpu;gpu.configure_face_styles(item['face_style_ids'],len(styles),item.get('selected_edges'))
@@ -171,20 +237,23 @@ def _prepare(camera_name,aspect):
             parameters=gpu.cross_planes.copy();parameters[:,:,3]=(parameters[:,:,3]+1)*2
             submit(cross.reshape(-1,2,4)[:,:,:3],parameters,styles,owners)
             cross_total+=len(owners);pass_reports.append(report)
-            if not reuse:item['edge_cache']={};item['edge_ranges']={}
+            if not reuse:item['edge_cache']={};item['edge_ranges']={};item['deferred_cache']={}
             for i,mesh in enumerate(live.scene['meshes']):
                 faces=item['face_style_ids'][i];selected=item.get('selected_edges')
                 selected=None if selected is None else selected[i]
                 if not np.any(faces>=0) and not selected:continue
                 if partial:
-                    _library.rt_begin_pass();first=_library.rt_group_count()
+                    _begin_pass();first=_library.rt_group_count()
                     if reuse and i not in dirty and i in item['edge_ranges']:
                         old,count,segments=item['edge_ranges'][i];_library.rt_reuse(old,count)
                         item['edge_ranges'][i]=(first,count,segments);total+=segments;edge_total+=segments
+                        if i in item['deferred_cache']:
+                            _deferred_entries.append((item['deferred_cache'][i],styles,item['retained_style_offset'],i))
                         continue
                 cache=item['edge_cache'].setdefault(i,{}) if partial else None
                 if cache is not None:cache['evaluate']=_evaluate_edges
-                try:data=retained_geometry.candidates(mesh,faces,styles,selected,cache=cache)
+                try:data=retained_geometry.candidates(mesh,faces,styles,selected,cache=cache,
+                                                     defer_nonmanifold=hasattr(_library,'rt_reuse'))
                 except retained_geometry.UnsupportedRetained as error:
                     raise retained_geometry.UnsupportedRetained(mesh['name']+': '+str(error)) from error
                 parameters=data.get('parameters')
@@ -193,8 +262,21 @@ def _prepare(camera_name,aspect):
                     parameters[:,0,:3]=data['normal0'];parameters[:,1,:3]=data['normal1']
                 parameters[:,0,3]=2*(i+1)+data['dynamic'];parameters[:,1,3]=2*(i+1)
                 submit(data['points'],parameters,styles,data['owners']);edge_total+=len(data['owners'])
+                item['deferred_cache'].pop(i,None)
+                if data.get('deferred') is not None:
+                    item['deferred_cache'][i]=data['deferred']
+                    _deferred_entries.append((data['deferred'],styles,item['retained_style_offset'],i))
                 if partial:item['edge_ranges'][i]=(first,_library.rt_group_count()-first,len(data['owners']))
-    _library.rt_end()
+    # Keep authored line-pass compositing order. Exceptional strokes currently
+    # form a small tail group; with multiple passes that tail could overpaint a
+    # later line. The established complete path remains the oracle for that case.
+    if _deferred_entries and len(_passes)>1:
+        raise retained_geometry.UnsupportedRetained('Multiple line passes with exceptional silhouettes use the legacy GPU viewport')
+    _fixed_group_count=_library.rt_group_count();_fixed_segments=total;_fixed_batches=batch_count
+    deferred_count,deferred_batches=_draw_deferred(camera)
+    total+=deferred_count;batch_count+=deferred_batches;edge_total+=deferred_count
+    _deferred_camera_key=camera_key
+    native_groups=_library.rt_group_count();_library.rt_end()
     _geometry_style_key=geometry_style_key
     _key=(vp._generation,vp._gpu_rebuild,vp._gpu_graph_dirty,vp._gpu_style_dirty)
     vp._last_report=dict(state='ready',backend='retained_gpu',segments=total,submitted_segments=total,
@@ -203,3 +285,6 @@ def _prepare(camera_name,aspect):
         smooth_mesh_count=sum(m.get('smooth_level',0)>0 for m in live.scene['meshes']),
         geometry_generation=vp._generation,geometry_updated=changed,prepare_ms=(time.perf_counter()-started)*1000,
         camera_classification='GPU shader on every frame',intersection_diagnostics=pass_reports)
+    vp._last_report.update(exceptional_edges=sum(len(d['owners']) for d,_,_,_ in _deferred_entries),
+                           exceptional_visible_segments=deferred_count,retained_draw_groups=native_groups,
+                           retained_group_segment_limit=MAX_RETAINED_GROUP_SEGMENTS)

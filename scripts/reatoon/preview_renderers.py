@@ -31,7 +31,8 @@ class Preview(render.MRenderOverride):
             def create():
                 global _pending
                 try:
-                    if _override is not None:viewport.enable(_from_renderer=True)
+                    # A deferred request can outlive a switch to Fast/VP2.
+                    if _override is not None and allowed(destination):viewport.enable(_from_renderer=True)
                 finally:_pending=False
             utils.executeDeferred(create)
 

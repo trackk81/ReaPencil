@@ -32,8 +32,11 @@ def dependencies(shape):
     # Watch graphs once, not per camera frame. Include all shaders so adding
     # a new opacity connection to an initially opaque material is detected.
     result=set()
+    from .mesh_surface import mesh_function
     path=om.MSelectionList().add(shape).getDagPath(0)
-    engines,_=om.MFnMesh(path).getConnectedShaders(path.instanceNumber())
+    fn=mesh_function(path)
+    if fn is None:return result
+    engines,_=fn.getConnectedShaders(path.instanceNumber())
     for engine in engines:
         shaders=cmds.listConnections(om.MFnDependencyNode(engine).name()+'.surfaceShader',s=True,d=False) or []
         for shader in shaders:

@@ -1,0 +1,36 @@
+#version 410
+uniform mat4 viewProjection : ViewProjection;
+uniform vec2 viewportSize : ViewportPixelSize;
+uniform vec4 lineColor = {0,0,0,1};
+uniform float lineWidth = 1.5;
+attribute APPDATA { vec3 inPosition : POSITION; };
+attribute VERTEXDATA { float dummy; };
+attribute FRAGMENTDATA { float sideDistance; };
+attribute PIXELDATA { vec4 outColor : COLOR0; };
+GLSLShader EdgeVertex {
+ void main(){gl_Position=viewProjection*vec4(inPosition,1);VS_OUT.dummy=0;}
+}
+GLSLShader EdgeGeometry {
+ layout(lines) in;
+ layout(triangle_strip,max_vertices=4) out;
+ bool clipPlane(float a,float b,inout float low,inout float high){if(a<0&&b<0)return false;if(a<0)low=max(low,a/(a-b));else if(b<0)high=min(high,a/(a-b));return low<=high;}
+ void main(){
+  if(lineWidth<=0)return;vec4 a=gl_in[0].gl_Position,b=gl_in[1].gl_Position;float low=0,high=1;
+  float mx=1+(lineWidth+2)/viewportSize.x,my=1+(lineWidth+2)/viewportSize.y;
+  if(!clipPlane(a.w+a.z,b.w+b.z,low,high)||!clipPlane(a.w-a.z,b.w-b.z,low,high))return;
+  if(!clipPlane(a.w*mx+a.x,b.w*mx+b.x,low,high)||!clipPlane(a.w*mx-a.x,b.w*mx-b.x,low,high))return;
+  if(!clipPlane(a.w*my+a.y,b.w*my+b.y,low,high)||!clipPlane(a.w*my-a.y,b.w*my-b.y,low,high))return;
+  vec4 first=mix(a,b,low),last=mix(a,b,high);if(first.w<=1e-12||last.w<=1e-12)return;
+  vec2 delta=(last.xy/last.w-first.xy/first.w)*viewportSize;if(dot(delta,delta)<1e-12)return;
+  vec2 side=normalize(vec2(-delta.y,delta.x))*(lineWidth+1)/viewportSize;
+  for(int i=0;i<4;++i){vec4 p=i<2?first:last;float s=(i%2)==0?1:-1;p.xy+=side*p.w*s;gl_Position=p;GS_OUT.sideDistance=s*(lineWidth+1)*.5;EmitVertex();}EndPrimitive();
+ }
+}
+GLSLShader EdgePixel {
+ void main(){float coverage=clamp((lineWidth+1)*.5-abs(PS_IN.sideDistance),0,1);if(coverage<=0)discard;gl_FragDepth=max(0.0,gl_FragCoord.z-4.0/16777215.0);outColor=vec4(lineColor.rgb,lineColor.a*coverage);}
+}
+technique Main { pass P0 {
+ VertexShader(in APPDATA,out VERTEXDATA VS_OUT)=EdgeVertex;
+ GeometryShader(in VERTEXDATA GS_IN,out FRAGMENTDATA GS_OUT)=EdgeGeometry;
+ PixelShader(in FRAGMENTDATA PS_IN,out PIXELDATA)=EdgePixel;
+} }

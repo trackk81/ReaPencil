@@ -3,6 +3,7 @@ import ctypes
 import numpy as np
 from maya import cmds
 from maya.api import OpenMaya as om
+from .mesh_surface import mesh_function,surface_input_changed
 _key=None
 rebuilds=0
 _watching=False
@@ -25,14 +26,26 @@ def sync():
                 viewport._node_callbacks.append(om.MNodeMessage.addAttributeChangedCallback(sel.getDependNode(0),edge_changed))
                 if sel.getDependNode(0).hasFn(om.MFn.kMesh):
                     viewport._node_callbacks.append(om.MPolyMessage.addPolyTopologyChangedCallback(sel.getDependNode(0),viewport._scene_changed))
+        # Initial mesh input does not always emit a topology event. Watch empty
+        # placeholders even when authored-edge overlays are disabled.
+        for name in cmds.ls(type='mesh') or []:
+            path=om.MSelectionList().add(name).getDagPath(0)
+            if mesh_function(path) is None:
+                viewport._node_callbacks.append(om.MNodeMessage.addAttributeChangedCallback(path.node(),surface_input_changed))
+                if not _feature_watch:
+                    viewport._node_callbacks.append(om.MPolyMessage.addPolyTopologyChangedCallback(path.node(),viewport._scene_changed))
         viewport._watchers_stale=False;_watching=True
     key=viewport._fast_target_revision
     if key==_key:return
-    graph=line_graph.snapshot();members=[];all_full=True;assigned_shaders=set()
+    graph=line_graph.snapshot();members=[];all_full=True;assigned_shaders=set();empty_meshes=[]
     rebuilds+=1
     for name in cmds.ls(type='mesh',long=True,allPaths=True) or []:
         if cmds.getAttr(name+'.intermediateObject'):continue
-        selection=om.MSelectionList();selection.add(name);path=selection.getDagPath(0);fn=om.MFnMesh(path)
+        selection=om.MSelectionList();selection.add(name);path=selection.getDagPath(0);fn=mesh_function(path)
+        # Maya may have a valid DAG shape with no mesh data. Shader queries on
+        # these placeholders raise kFailure, including their instance paths.
+        if fn is None:
+            empty_meshes.append(name);continue
         engines,ids=fn.getConnectedShaders(path.instanceNumber());shaders=[]
         for engine in engines:
             source=cmds.listConnections(om.MFnDependencyNode(engine).name()+'.surfaceShader',source=True,destination=False) or []
@@ -52,7 +65,7 @@ def sync():
         sel=om.MSelectionList();sel.add(shape);obj=sel.getDagPath(0).node()
         if not any(obj.hasFn(k) for k in (om.MFn.kMesh,om.MFn.kNurbsCurve,om.MFn.kCamera,om.MFn.kLocator,om.MFn.kLight)):all_full=False;blockers.append(shape)
     unused=sorted({s for line in graph for item in line['sets'] for s in item['shaders']}-assigned_shaders)
-    _last_plan=dict(unassigned_shader_targets=unused,revision=key,rebuilds=rebuilds,members=list(members),target_all=bool(all_full and members),other_shape_blockers=blockers)
+    _last_plan=dict(unassigned_shader_targets=unused,revision=key,rebuilds=rebuilds,members=list(members),target_all=bool(all_full and members),other_shape_blockers=blockers,empty_meshes=empty_meshes)
     fast_viewport._target_summary=dict(unassigned_shader_targets=unused,target_ranges=len(members))
     lib=fast_viewport._library;lib.rp_fast_all.argtypes=[ctypes.c_int];lib.rp_fast_all(int(all_full and bool(members))); lib.rp_fast_targets.argtypes=[ctypes.c_char_p];lib.rp_fast_targets.restype=None
     lib.rp_fast_targets(('\n'.join(members)).encode('utf-8'));_key=key

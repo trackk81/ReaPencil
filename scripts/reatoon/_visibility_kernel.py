@@ -17,9 +17,9 @@ def _box(origin,direction,low,high,near,far):
 @njit(cache=True,nogil=True)
 def is_occluded(origin,direction,near,limit,context):
     roots,lows,highs,children,ranges,order,triangles=context
-    # Original stable-median BVHs halve ranges at every split. This bounds
-    # pending depth from the actual triangle count rather than a fixed limit.
-    stack=np.empty(int(np.log2(max(1,len(order))))+3,np.int64)
+    # Mesh trees and the optional root hierarchy each halve their input range.
+    # Twice the packed node-count logarithm bounds their combined pending depth.
+    stack=np.empty(2*int(np.log2(max(1,len(children))))+4,np.int64)
     magnitude=max(1.,max(abs(origin[0]),abs(origin[1]),abs(origin[2])),max(abs(direction[0]),abs(direction[1]),abs(direction[2]))*abs(limit))
     guard=256*np.finfo(np.float64).eps*magnitude
     far=limit-guard

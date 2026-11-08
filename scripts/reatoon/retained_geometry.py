@@ -11,7 +11,7 @@ class UnsupportedRetained(ValueError):
     """Use the complete legacy GPU viewport for this topology or style."""
 
 
-def candidates(mesh,face_styles,styles,selected_edges=None,cache=None):
+def candidates(mesh,face_styles,styles,selected_edges=None,cache=None,defer_nonmanifold=False):
     if cache is not None and 'evaluate' in cache and 'template' in cache:
         data=cache['template'];cache['evaluate'](mesh,data)
         return data
@@ -31,9 +31,11 @@ def candidates(mesh,face_styles,styles,selected_edges=None,cache=None):
     counts=ends-starts
     # Non-manifold adjacency is handled explicitly by the existing GPU path;
     # never silently treat an arbitrary number of incident faces as two faces.
-    if np.any(p['counts']>2) or np.any(counts>2):
+    nonmanifold=np.r_[p['counts']>2,np.zeros(len(p['diagonal_pairs']),bool)]|(counts>2)
+    if np.any(nonmanifold) and not defer_nonmanifold:
         raise UnsupportedRetained('Retained edge shader requires at most two incident triangles (polygon maximum %d, triangle maximum %d)'%(p['counts'].max(),counts.max()))
     tri=p['triangles'];a=v[tri[:,0]];normals=np.cross(v[tri[:,1]]-a,v[tri[:,2]]-a)
+    raw_normals=normals.copy() if defer_nonmanifold and np.any(nonmanifold) else None
     norm=np.linalg.norm(normals,axis=1);normals/=np.maximum(norm[:,None],1e-30)
     # Maya can omit degenerate source polygons from its triangulation. Their
     # incidence contributes no front-facing triangle, as in the OpenCL path.
@@ -73,7 +75,23 @@ def candidates(mesh,face_styles,styles,selected_edges=None,cache=None):
             angle_mask &= minimum>=upper[own]-1e-8
         static[:n]|=np.where(angle_mask,enabled[:n]&8,0)
     dynamic=((enabled&4)!=0)&np.r_[p['counts']>1,np.ones(len(p['diagonal_pairs']),bool)]
-    if cache is not None and 'evaluate' in cache and not any(s.get('crease') for s in styles):
+    # Preserve the complete arbitrary-incidence silhouette rule, without making
+    # one exceptional edge send the whole city through per-frame GPU readback.
+    # Static features need no camera classification. Only dynamic exceptional
+    # edges are deferred; each remains one stroke, never duplicated face pairs.
+    deferred=None
+    special=(owners>=0)&(static==0)&dynamic&nonmanifold&(counts>0)
+    if defer_nonmanifold and np.any(special):
+        ids=np.flatnonzero(special);ranges=[order[starts[i]:ends[i]]//3 for i in ids]
+        sizes=np.array([len(r) for r in ranges],np.int32)
+        rows=np.concatenate(ranges)
+        deferred=dict(points=np.ascontiguousarray(v[pairs[ids]]),owners=owners[ids],
+            normal0=plane0[ids],normal1=plane1[ids],normals=raw_normals[rows],origins=a[rows],
+            starts=np.cumsum(sizes)-sizes,counts=sizes,
+            polygon_counts=np.r_[p['counts'],np.full(len(p['diagonal_pairs']),2,np.int32)][ids],
+            diagonal=ids>=n,edge_ids=ids)
+    if defer_nonmanifold:dynamic[nonmanifold&(static==0)]=False
+    if cache is not None and 'evaluate' in cache and not np.any(nonmanifold) and not any(s.get('crease') for s in styles):
         keep=(owners>=0)&((static!=0)|dynamic)
         triangles=np.full((len(pairs),6),-1,np.int32)
         present=counts>0;triangles[present,:3]=tri[order[starts[present]]//3]
@@ -90,7 +108,20 @@ def candidates(mesh,face_styles,styles,selected_edges=None,cache=None):
     keep=(owners>=0)&((static!=0)|dynamic)
     return dict(points=np.ascontiguousarray(v[pairs[keep]]),owners=owners[keep],
                 normal0=plane0[keep],normal1=plane1[keep],dynamic=(static[keep]==0),
-                static_flags=static[keep],edge_ids=np.flatnonzero(keep))
+                static_flags=static[keep],edge_ids=np.flatnonzero(keep),deferred=deferred)
+
+
+def deferred_camera_mask(data,camera):
+    """Exact existing OpenCL front-count predicate for exceptional edges only."""
+    eye=np.asarray(camera['position'],np.float64)
+    if camera.get('projection')=='orthographic':
+        direction=eye-np.asarray(camera['target'],np.float64)
+        direction/=max(np.linalg.norm(direction),1e-30)
+    else:direction=eye-data['origins']
+    products=data['normals']*direction
+    front=((products[:,0]+products[:,1])+products[:,2])>0
+    total=np.add.reduceat(front.astype(np.int32),data['starts'])
+    return np.where(data['diagonal'],total==1,(total>0)&(total<data['polygon_counts']))
 
 
 def camera_mask(data,camera):

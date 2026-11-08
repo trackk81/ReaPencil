@@ -5,6 +5,7 @@ a Line, the first matching LineSet wins. Targets are live DG connections and
 ordinary Maya set memberships, never a snapshot of shader assignments.
 """
 import json
+import numpy as np
 
 from maya import cmds
 from maya.api import OpenMaya as om
@@ -288,11 +289,15 @@ def resolve_mesh(path, face_count, material_shaders, material_ids, graph):
     transform = shape.rsplit("|", 1)[0]
     selected = set()
     passes = []
+    material_ids=np.asarray(material_ids,dtype=np.int64)
+    uniform_material=(int(material_ids[0]) if len(material_ids) and material_ids.min()==material_ids.max() else None)
     for line in graph:
         styles = [None] * face_count
+        pristine=True;filled_all=False
         edge_targets = {}
         for target in line["sets"]:
             faces = set()
+            whole=False
             target_edges = []
             for member in target["objects"]:
                 base = member.split(".", 1)[0]
@@ -307,12 +312,24 @@ def resolve_mesh(path, face_count, material_shaders, material_ids, graph):
                     selected.add(edge)
                     target_edges.append([iterator.vertexId(0), iterator.vertexId(1)])
                 else:
-                    faces.update(range(face_count))
+                    whole=True
             shader_ids = {i for i, shader in enumerate(material_shaders) if shader in target["shaders"]}
-            faces.update(i for i, material in enumerate(material_ids) if int(material) in shader_ids)
-            for face in faces:
-                if 0 <= face < face_count and styles[face] is None:
-                    styles[face] = target["node"]
+            if not filled_all:
+                if shader_ids and len(material_ids) and not whole:
+                    if uniform_material is not None:
+                        if uniform_material in shader_ids:
+                            whole=len(material_ids)==face_count
+                            if not whole:faces.update(range(len(material_ids)))
+                    else:
+                        matches=np.isin(material_ids,list(shader_ids))
+                        whole=len(material_ids)==face_count and bool(matches.all())
+                        if not whole:faces.update(np.flatnonzero(matches).tolist())
+                if whole and pristine:
+                    styles=[target['node']]*face_count;filled_all=True;pristine=False
+                else:
+                    for face in (range(face_count) if whole else faces):
+                        if 0 <= face < face_count and styles[face] is None:
+                            styles[face]=target['node'];pristine=False
             edge_targets[target["node"]] = target_edges
         passes.append(dict(line=line["line"], priority=line["priority"], face_line_sets=styles, selected_edges=edge_targets))
     return passes, selected

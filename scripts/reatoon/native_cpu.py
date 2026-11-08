@@ -3,6 +3,7 @@ import ctypes
 from pathlib import Path
 import numpy as np
 _lib=None
+_segments_lib=None
 
 class QueryMesh(ctypes.Structure):
     _fields_=[(k,ctypes.c_void_p) for k in ('low','high','child','ranges','order','tri','triLow','triHigh','indices','owners','normal','area','longest','activeTri','activeNode')]
@@ -136,15 +137,30 @@ def triangle_mask(vertices,triangles,bounds,ortho,span,focal,near,far,bias,margi
     library().rp_mask(vertices.ctypes.data,triangles.ctypes.data,len(triangles),bounds.ctypes.data,out.ctypes.data,counts.ctypes.data,w,h,int(ortho),span,focal,near,far,bias,margin,tolerance)
     return out,counts
 
-def segments(points,widths,biases,colors,only,enabled,depth,planes,visible,ss,ortho,span,focal,near,far,visibility,eye,inverse_basis,stats):
+def segments(points,widths,biases,colors,only,enabled,depth,planes,visible,ss,ortho,span,focal,near,far,visibility,eye,inverse_basis,stats,raw_rows=False):
     arrays=[np.ascontiguousarray(a,dtype) for a,dtype in zip((points,widths,biases,colors,only,enabled),(np.float64,np.float64,np.float64,np.float64,np.bool_,np.uint8))]
     eye=np.ascontiguousarray(eye,np.float64);inverse_basis=np.ascontiguousarray(inverse_basis,np.float64)
     context=Visibility(*[visibility[i].ctypes.data for i in (0,3,4,5,1,2,6)],len(visibility[0])) if visibility is not None else None
     result=SegmentResult();h,w=depth.shape;lib=library()
-    status=lib.rp_segments(*[a.ctypes.data for a in arrays],len(points),depth.ctypes.data,planes.ctypes.data,visible.ctypes.data,w,h,int(ss),int(ortho),span,focal,near,far,ctypes.byref(context) if context else None,eye.ctypes.data,inverse_basis.ctypes.data,ctypes.byref(result))
+    global _segments_lib
+    if _segments_lib is None:
+        try:
+            extra=ctypes.CDLL(str(Path(__file__).resolve().parents[2]/'plug-ins/2025/reaPencilSegments159.dll'))
+            extra.rp_segments159.argtypes=lib.rp_segments.argtypes;extra.rp_segments159.restype=ctypes.c_int
+            extra.rp_segments159_free.argtypes=[ctypes.POINTER(ctypes.c_double)];extra.rp_segments159_free.restype=None
+            extra.rp_segments159_stats.argtypes=[ctypes.c_void_p];extra.rp_segments159_stats.restype=None
+            _segments_lib=extra
+        except OSError:_segments_lib=False
+    function=_segments_lib.rp_segments159 if _segments_lib else lib.rp_segments
+    free=_segments_lib.rp_segments159_free if _segments_lib else lib.rp_query_free
+    status=function(*[a.ctypes.data for a in arrays],len(points),depth.ctypes.data,planes.ctypes.data,visible.ctypes.data,w,h,int(ss),int(ortho),span,focal,near,far,ctypes.byref(context) if context else None,eye.ctypes.data,inverse_basis.ctypes.data,ctypes.byref(result))
+    if _segments_lib:
+        global _last_segment_profile
+        measured=np.zeros(9,np.float64);_segments_lib.rp_segments159_stats(measured.ctypes.data)
+        _last_segment_profile=dict(zip(('project_seconds','worker_seconds','samples','strokes','stroke_pixels','composite_pixels','ray_trees','cache_hits','projected_segments'),measured.tolist()))
     if status!=0:raise RuntimeError('Native CPU segment allocation failed')
     try:
         rows=np.ctypeslib.as_array(result.rows,shape=(result.size,5)).copy() if result.size else np.empty((0,5))
         stats[:]=[result.checked,result.hidden]
-        return [(int(row[0]),*row[1:]) for row in rows]
-    finally:lib.rp_query_free(result.rows)
+        return rows if raw_rows else [(int(row[0]),*row[1:]) for row in rows]
+    finally:free(result.rows)

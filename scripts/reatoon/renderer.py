@@ -290,14 +290,17 @@ def prepare_edges(mesh):
     """
     vertices = np.asarray(mesh['vertices'], dtype=float)
     faces = mesh.get('faces', mesh.get('triangles', []))
-    counts = (np.full(len(faces),faces.shape[1],dtype=np.int64)
+    from .native_mesh import PolygonViews,PackedPolygons
+    packed_faces=isinstance(faces,(PolygonViews,PackedPolygons))
+    counts = (np.asarray(faces.counts,np.int64) if packed_faces else
+              np.full(len(faces),faces.shape[1],dtype=np.int64)
               if isinstance(faces,np.ndarray) and faces.ndim==2 else
               np.asarray([len(face) for face in faces],dtype=np.int64))
     if not len(counts) or np.any(counts < 3):
         raise ValueError('Meshes require polygon faces with at least three vertices')
     starts = np.concatenate(([0], np.cumsum(counts)[:-1]))
     try:
-        flat = np.asarray(faces,dtype=np.int64).reshape(-1)
+        flat = np.asarray(faces.flat_indices if packed_faces else faces,dtype=np.int64).reshape(-1)
     except ValueError:  # mixed polygon sizes
         flat = np.concatenate(faces).astype(np.int64)
     if len(flat) and (flat.min()<0 or flat.max()>=len(vertices)):raise ValueError('Invalid polygon vertex index')
@@ -504,7 +507,7 @@ def line_style_passes(scene, settings=None):
     return result
 
 
-def world_line_segments(scene, settings=None, intersections=None, prepared_edges=None, intersection_masks=None, style_passes=None, packed=False,prepared_intersections=None,prepared_outlines=None):
+def world_line_segments(scene, settings=None, intersections=None, prepared_edges=None, intersection_masks=None, style_passes=None, packed=False,prepared_intersections=None,prepared_outlines=None,edge_visibility_masks=None):
     """Return camera-selected world-space segments for rendering or VP2.
 
     Result contains ``segments``, ``warnings`` and ``intersection_diagnostics``.
@@ -530,6 +533,20 @@ def world_line_segments(scene, settings=None, intersections=None, prepared_edges
         from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=max(1,min(4,len(meshes)))) as pool:
             triangle_outlines=list(pool.map(lambda pair:outline_edges(pair[0],camera,pair[1]),zip(meshes,prepared_edges)))
+    edge_keep=diagonal_keep=None
+    if edge_visibility_masks is not None:
+        from .cpu_edge_visibility159 import keep_edges
+        def certified(pair):
+            index,mesh=pair
+            pairs=prepared_edges[index]['pairs'];diagonals=triangle_outlines[index][1] if triangle_outlines is not None else np.empty((0,2),np.int64)
+            combined=np.concatenate((pairs,diagonals)) if len(diagonals) else pairs
+            keep=keep_edges(combined,mesh['triangles'],edge_visibility_masks[index])
+            return keep[:len(pairs)],keep[len(pairs):]
+        if len(meshes)>1 and sum(len(m['triangles']) for m in meshes)>=100000:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=4) as pool:certificates=list(pool.map(certified,enumerate(meshes)))
+        else:certificates=[certified(pair) for pair in enumerate(meshes)]
+        edge_keep=[pair[0] for pair in certificates];diagonal_keep=[pair[1] for pair in certificates]
     if any(local.get("intersections") or local.get("self_intersections") for local in all_styles):
         if intersections is None:
             intersections = find_render_intersections(meshes, self_intersections=any(local.get("self_intersections") for local in all_styles),
@@ -587,6 +604,7 @@ def world_line_segments(scene, settings=None, intersections=None, prepared_edges
                     routes=[(ids,flags,local)]
                 for indices,flags,local in routes:
                     chosen=indices[edge_styles[indices] == style_id]
+                    if edge_keep is not None:chosen=chosen[edge_keep[index][chosen]]
                     if packed:
                         segments.add_edges(mesh,index,prepared,chosen,flags,local,item['line'])
                     else:
@@ -602,6 +620,7 @@ def world_line_segments(scene, settings=None, intersections=None, prepared_edges
                 for local in feature_styles(parent_style,'outline'):
                     if triangle_outlines is not None and local.get('outline'):
                         chosen=np.flatnonzero(diagonal_styles==style_id)
+                        if diagonal_keep is not None:chosen=chosen[diagonal_keep[index][chosen]]
                         if packed:
                             segments.add_edges(mesh,index,dict(vertices=prepared['vertices'],pairs=diagonal_pairs),
                                 chosen,np.full(len(diagonal_pairs),4,np.uint8),local,item['line'])
@@ -658,7 +677,9 @@ def world_line_segments(scene, settings=None, intersections=None, prepared_edges
                 segments.append(dict(a=intersection["a"], b=intersection["b"], features=["intersection"],
                                      mesh_index=index, mesh=meshes[index].get("name", "mesh"),
                                      settings=child, mesh_indices=intersection["mesh_indices"], line=item["line"]))
-    return dict(segments=segments, warnings=warnings, intersection_diagnostics=diagnostic)
+    return dict(segments=segments, warnings=warnings, intersection_diagnostics=diagnostic,
+                certified_hidden_edges=(sum(int(np.count_nonzero(~keep)) for keep in edge_keep+diagonal_keep)
+                                        if edge_keep is not None else 0))
 
 
 def _stroke(layer, a, b, width, color):
@@ -857,7 +878,12 @@ def render(scene, output_prefix, settings=None, depth_prepass=None):
         if verts.ndim != 2 or verts.shape[1] != 3 or not np.isfinite(verts).all():
             raise ValueError("Mesh vertices must be a finite Nx3 array")
         faces = mesh.get("faces", mesh.get("triangles", []))
-        if isinstance(faces,np.ndarray):
+        from .native_mesh import PolygonViews,PackedPolygons
+        if isinstance(faces,(PolygonViews,PackedPolygons)):
+            indices=faces.flat_indices
+            if faces.minimum_size<3 or (indices.size and (indices.min()<0 or indices.max()>=len(verts))):
+                raise ValueError("Polygon has invalid vertex indices")
+        elif isinstance(faces,np.ndarray):
             if faces.ndim!=2 or faces.shape[1]<3 or (faces.size and (faces.min()<0 or faces.max()>=len(verts))):
                 raise ValueError("Polygon has invalid vertex indices")
         else:
@@ -954,9 +980,16 @@ def render(scene, output_prefix, settings=None, depth_prepass=None):
              not any(s.get('hidden_lines',False) or any(float(s.get(k,0))!=0 for k in
                  ('dash_length','distance_reduction','width_variation','taper')) for s in all_styles))
     prepared_intersections=[] if refined else None
+    # Constant visible-only strokes can reuse the existing conservative depth
+    # proof. Stateful/profile/hidden/effect routes retain all source edges.
+    edge_masks=(masks if refined and not profiles_active and not effect_layers and
+                group_image is None and not elements and
+                not any('_brush_channels' in s or s.get('_visibility_mode')==-1 or
+                        s.get('connect_collinear_dashes',False) for s in all_styles) else None)
     line_data = world_line_segments(scene, cfg,intersection_masks=masks,style_passes=styles,
                                    packed=line_only and cfg.get('compiled_segments',True),
-                                   prepared_intersections=prepared_intersections,prepared_outlines=depth_prepass["outlines"] if depth_prepass is not None else None)
+                                   prepared_intersections=prepared_intersections,prepared_outlines=depth_prepass["outlines"] if depth_prepass is not None else None,
+                                   edge_visibility_masks=edge_masks)
     visibility=None
     if refined:
         try:
@@ -973,6 +1006,7 @@ def render(scene, output_prefix, settings=None, depth_prepass=None):
     stats['intersection_segments']=(packed_lines.intersection_count if hasattr(packed_lines,'intersection_count') else
                                    sum('intersection' in segment['features'] for segment in packed_lines))
     stats["intersection_diagnostics"] = line_data["intersection_diagnostics"]
+    if edge_masks is not None:stats['certified_hidden_edges']=line_data['certified_hidden_edges']
     geometry_finished=time.perf_counter()
     remaining_segments=line_data['segments']
     effect_beauty=None

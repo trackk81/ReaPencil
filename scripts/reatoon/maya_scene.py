@@ -346,6 +346,7 @@ def _line_membership(path, line_sets):
 
 def export_scene(camera=None, settings=None, camera_override=None, include_normals=True, geometry_purpose="render", include_materials=True, as_arrays=False, mesh_filter=None, geometry_cache=None, mesh_ready=None, alpha_configuration=None):
     from . import line_graph
+    from .mesh_surface import mesh_function
     from . import smooth_geometry
     from . import alpha_boundary
     settings = validate_settings(settings or load_settings())
@@ -376,24 +377,35 @@ def export_scene(camera=None, settings=None, camera_override=None, include_norma
             warnings.append("Only the first visible directional light is used; other lights are ignored.")
     elif include_materials:
         warnings.append("No directional light: using the ReaToon preview light.")
+    native_ready=False;shader_cache={}
+    global_smooth_type=cmds.optionVar(query='globalPolyDefaultSmoothDrawType') if geometry_purpose=='render' else None
     for name in cmds.ls(type="mesh", long=True, allPaths=True) or []:
         if geometry_purpose=='viewport' and mesh_filter is not None and name not in mesh_filter:continue
         path = _dag(name)
-        if cmds.getAttr(name + ".intermediateObject") or not path.isVisible():
+        if om.MFnDagNode(path).isIntermediateObject or not path.isVisible():
             continue
-        source_fn = om.MFnMesh(path)
-        alpha_config=(alpha_configuration or alpha_boundary.configuration)(name)
+        source_fn = mesh_function(path)
+        # Empty DAG placeholders have no renderable surface and Maya's shader
+        # query can fail even though the shape node itself still exists.
+        if source_fn is None:
+            continue
+        alpha_config=(alpha_configuration(name) if alpha_configuration is not None else
+                      alpha_boundary.configuration(name,source_fn))
         shading_engines, ids = source_fn.getConnectedShaders(path.instanceNumber())
+        if as_arrays:ids=np.asarray(ids,dtype=np.int64)
         chosen, selected = _line_membership(path, line_sets)
         passes = None
         if graph_enabled:
             shader_names = []
             for sg in shading_engines:
-                sources = cmds.listConnections(om.MFnDependencyNode(sg).name() + ".surfaceShader", source=True, destination=False) or []
-                shader_names.append(sources[0] if sources else "")
+                sg_name=om.MFnDependencyNode(sg).name()
+                if sg_name not in shader_cache:
+                    sources=cmds.listConnections(sg_name+".surfaceShader",source=True,destination=False) or []
+                    shader_cache[sg_name]=sources[0] if sources else ""
+                shader_names.append(shader_cache[sg_name])
             passes, selected = line_graph.resolve_mesh(path, source_fn.numPolygons, shader_names, ids, graph)
         uniform=(geometry_purpose=='render' and not need_edge_provenance and not alpha_config
-                 and (not len(ids) or min(ids)==max(ids))
+                 and (not len(ids) or (ids.min()==ids.max() if isinstance(ids,np.ndarray) else min(ids)==max(ids)))
                  and all(len(set(item['face_line_sets']))<=1 for item in (passes or [])))
         evaluated=None
         cached=(geometry_cache or {}).get(name) if geometry_purpose=='viewport' and as_arrays and not need_edge_provenance and not alpha_config else None
@@ -401,12 +413,13 @@ def export_scene(camera=None, settings=None, camera_override=None, include_norma
         if evaluated is None and as_arrays and not need_edge_provenance and not include_normals and not alpha_config:
             from . import native_mesh
             try:
+                if not native_ready:native_mesh.load();native_ready=True
                 divisions=smooth_geometry.level(path,settings['enabled_smooth_mesh'],geometry_purpose)
                 if geometry_purpose=='render':
                     from . import render_geometry_cache
-                    evaluated=render_geometry_cache.evaluate(path,divisions,uniform=uniform)
+                    evaluated=render_geometry_cache.evaluate(path,divisions,uniform=uniform,exporter_ready=True,global_smooth_type=global_smooth_type)
                 else:
-                    evaluated=native_mesh.evaluate(path,divisions,purpose=geometry_purpose)
+                    evaluated=native_mesh.evaluate(path,divisions,purpose=geometry_purpose,exporter_ready=True)
             except RuntimeError as error:
                 if 'exporter is unavailable' not in str(error):raise
                 warnings.append(str(error)+'; using Maya Python geometry evaluation')
@@ -517,12 +530,16 @@ def render_scene(output_prefix, camera=None, settings=None, write_scene=False, a
                      planes=np.zeros((h,w,3)),owners=np.full((h,w),-1,np.int32) if list_merge_groups() else None,
                      counts=[],meshes=[],outlines=[])
     pending=[];depth_tasks=[]
+    from . import render_geometry_cache
     def prepare_cpu(mesh,index):
-        edges=renderer._render_edges(mesh)
-        if native is not None:_prepare(mesh,native_bvh=True)
-        if prepass is not None:
-            from .cpu_outline import outline_edges
-            prepass['outlines'][index]=outline_edges(mesh,prepass['camera'],edges)
+        try:
+            edges=renderer._render_edges(mesh)
+            if native is not None:_prepare(mesh,native_bvh=True)
+            if prepass is not None:
+                from .cpu_outline import outline_edges
+                prepass['outlines'][index]=outline_edges(mesh,prepass['camera'],edges)
+        finally:
+            if '_render_geometry' in mesh:render_geometry_cache.geometry_changed(mesh['_render_geometry'])
     def prepare_depth(mesh,index):
         from .cpu_depth import rasterize_mesh
         camera=prepass['camera']
