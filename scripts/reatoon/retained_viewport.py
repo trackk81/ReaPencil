@@ -33,6 +33,12 @@ def _set_style(style_id,width,color):
         values=validate(curve)
     else:values=[0.,0.,1.,1.]
     _library.rt_style_depth(style_id,(c.c_float*4)(*values))
+    alpha=style.get('alpha_depth_reduction',[])
+    if alpha and not style.get('alpha_reduction_origin'):
+        from .depth_reduction import validate
+        alpha=validate(alpha)
+    else:alpha=[0.,0.,1.,1.]
+    _library.rt_style_alpha_depth(style_id,(c.c_float*4)(*alpha))
 
 
 def _begin_pass():
@@ -64,6 +70,7 @@ def bind(lib):
     lib.rt_begin_pass.argtypes=[];lib.rt_begin_pass.restype=None
     lib.rt_style.argtypes=[c.c_uint,c.c_float,c.POINTER(c.c_float)];lib.rt_style.restype=None
     lib.rt_style_depth.argtypes=[c.c_uint,c.POINTER(c.c_float)];lib.rt_style_depth.restype=None
+    lib.rt_style_alpha_depth.argtypes=[c.c_uint,c.POINTER(c.c_float)];lib.rt_style_alpha_depth.restype=None
     lib.rt_mode.argtypes=[c.c_int];lib.rt_mode.restype=None
     if hasattr(lib,'rt_reuse'):
         lib.rt_reuse.argtypes=[c.c_uint,c.c_uint];lib.rt_reuse.restype=None
@@ -206,7 +213,7 @@ def _prepare(camera_name,aspect):
     if live.scene.get('merge_groups'):raise retained_geometry.UnsupportedRetained('Merge Groups use the legacy GPU viewport')
     if any(s.get(k) for item in _passes for s in item['styles'] for k in ('hidden_lines','dash_length','distance_reduction','width_variation','taper')):
         raise retained_geometry.UnsupportedRetained('Advanced brush styles use the legacy GPU viewport')
-    geometry_style_key=json.dumps([[{k:v for k,v in style.items() if k not in ('line_color','line_width','width_depth_reduction')} for style in p['styles']] for p in _passes],sort_keys=True)
+    geometry_style_key=json.dumps([[{k:v for k,v in style.items() if k not in ('line_color','line_width','width_depth_reduction','alpha_depth_reduction')} for style in p['styles']] for p in _passes],sort_keys=True)
     style_offset=0
     for item in _passes:
         item['retained_style_offset']=style_offset

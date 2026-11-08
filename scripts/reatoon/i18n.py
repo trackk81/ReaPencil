@@ -38,7 +38,11 @@ def set_language(value):
             if widget.isWindow():widget.setWindowTitle(tr(widget.windowTitle()))
             if isinstance(widget,QtWidgets.QTabWidget):
                 for i in range(widget.count()):widget.setTabText(i,tr(widget.tabText(i)))
-            if isinstance(widget,QtWidgets.QComboBox) and all(widget.itemText(i) in ('Off','끄기','FXAA') for i in range(widget.count())):
+            if isinstance(widget,QtWidgets.QTableWidget):
+                for column in range(widget.columnCount()):
+                    item=widget.horizontalHeaderItem(column)
+                    if item is not None:item.setText(tr(item.text()))
+            if isinstance(widget,QtWidgets.QComboBox) and all(widget.itemText(i) in set(STRINGS)|set(ALIASES)|{'FXAA'} for i in range(widget.count())):
                 widget.blockSignals(True)
                 for i in range(widget.count()):widget.setItemText(i,tr(widget.itemText(i)))
                 widget.blockSignals(False)

@@ -4,6 +4,9 @@ from . import i18n
 # Register its new button labels in that live catalog, including reverse lookup
 # so switching languages preserves the existing dialog and its edited fields.
 _measure_labels={
+    'Depth reduction':'거리 감소',
+    'Hidden depth reduction applies to CPU render.':'숨은 선의 거리 감소는 CPU 렌더에 적용됩니다.',
+    'Camera depth: width and alpha reduction in normal preview and CPU render.':'카메라 깊이 기준입니다. 선폭·알파 감소는 일반 프리뷰와 CPU 렌더에 적용됩니다.',
     'Fill width range from selection':'선택 오브젝트로 선폭 거리 채우기',
     'Measure selected objects':'선택 오브젝트 깊이 측정',
     'Fill this range from the selected mesh vertices using the active viewport camera. Distances are in cm. Click Apply to save.':'현재 뷰포트 카메라 기준으로 선택한 메시의 시작·종료 거리를 채웁니다. 단위는 cm이며 적용을 눌러 저장합니다.',
@@ -24,9 +27,9 @@ def open_editor(node,hidden=False):
     pointer=None if cmds.about(batch=True) else OpenMayaUI.MQtUtil.mainWindow()
     parent=shiboken6.wrapInstance(int(pointer),QtWidgets.QWidget) if pointer else None
     dialog=QtWidgets.QDialog(parent);dialog.setObjectName('reaPencilDepthReduction')
-    dialog.setWindowTitle(tr('Hidden depth reduction (CPU)' if hidden else 'Depth reduction (CPU)'))
+    dialog.setWindowTitle(tr('Hidden depth reduction (CPU)' if hidden else 'Depth reduction'))
     layout=QtWidgets.QVBoxLayout(dialog)
-    note=QtWidgets.QLabel(tr('Camera depth: width reduction in normal preview and CPU render. Alpha reduction in CPU render only.'))
+    note=QtWidgets.QLabel(tr('Hidden depth reduction applies to CPU render.' if hidden else 'Camera depth: width and alpha reduction in normal preview and CPU render.'))
     note.setWordWrap(True);layout.addWidget(note)
     measure_width_button=QtWidgets.QPushButton(tr('Fill width range from selection'));measure_width_button.setObjectName('measure_width_from_selection')
     measure_width_button.setToolTip(tr('Fill this range from the selected mesh vertices using the active viewport camera. Distances are in cm. Click Apply to save.'))

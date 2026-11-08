@@ -7,6 +7,7 @@ uniform vec4 eyeVector;
 uniform vec4 lineColor = {0,0,0,1};
 uniform float lineWidth = 1.5;
 uniform vec4 widthDepthReduction = {0,0,1,1};
+uniform vec4 alphaDepthReduction = {0,0,1,1};
 uniform mat4 worldView : WorldView;
 uniform vec2 viewportOrigin = {0,0};
 uniform bool scopeEnabled = false;
@@ -105,9 +106,18 @@ GLSLShader RTPixel {
         return (z>=0.0 && z<=1.0)?z:fallback;
     }
     void main() {
+        bool reduceWidth=widthDepthReduction.y>widthDepthReduction.x;
+        bool reduceAlpha=alphaDepthReduction.y>alphaDepthReduction.x;
+        float depth=0.0;
+        if(reduceWidth || reduceAlpha)depth=-(worldView*vec4(PS_IN.lineWorldPosition,1.0)).z;
+        float alphaFactor=1.0;
+        if(reduceAlpha){
+            float t=clamp((depth-alphaDepthReduction.x)/(alphaDepthReduction.y-alphaDepthReduction.x),0.0,1.0);
+            alphaFactor=mix(alphaDepthReduction.z,alphaDepthReduction.w,t);
+            if(alphaFactor<=0.0)discard;
+        }
         float currentWidth=lineWidth;
-        if(widthDepthReduction.y>widthDepthReduction.x){
-            float depth=-(worldView*vec4(PS_IN.lineWorldPosition,1.0)).z;
+        if(reduceWidth){
             float t=clamp((depth-widthDepthReduction.x)/(widthDepthReduction.y-widthDepthReduction.x),0.0,1.0);
             currentWidth*=mix(widthDepthReduction.z,widthDepthReduction.w,t);
             if(currentWidth<=0.0)discard;
@@ -129,10 +139,16 @@ GLSLShader RTPixel {
             if(lineZ>sceneZ+guard)discard;
         }
         vec2 xy=(gl_FragCoord.xy-viewportOrigin)/viewportSize*2.0-1.0;
-        float z=min(surfaceDepth(PS_IN.planeA,xy,gl_FragCoord.z),surfaceDepth(PS_IN.planeB,xy,gl_FragCoord.z));
-        if(checkCenterDepth && !hasSceneDepth)z=gl_FragCoord.z;
+        // The center test already decides visibility against the scene depth.
+        // A second per-fragment hardware test clips the expanded strip on its own surface.
+        // With a sampleable target, visibility was already tested at the center line.
+        // The native state skips a redundant expanded-strip hardware depth test.
+        float z=gl_FragCoord.z;
+        if(!checkCenterDepth){
+            z=min(surfaceDepth(PS_IN.planeA,xy,z),surfaceDepth(PS_IN.planeB,xy,z));
+        }
         gl_FragDepth=z>0.0?uintBitsToFloat(floatBitsToUint(z)-1u):z;
-        outColor=vec4(lineColor.rgb,lineColor.a*coverage);
+        outColor=vec4(lineColor.rgb,lineColor.a*coverage*alphaFactor);
     }
 }
 technique Main {
