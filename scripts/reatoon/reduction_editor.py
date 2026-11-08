@@ -1,5 +1,16 @@
 """Editor for CPU Linear distance reduction and reference-origin snapshots."""
-from .i18n import tr
+from . import i18n
+# A dialog module may be reloaded while Maya still holds an older UI catalog.
+# Register its new button labels in that live catalog, including reverse lookup
+# so switching languages preserves the existing dialog and its edited fields.
+_measure_labels={
+    'Fill width range from selection':'선택 오브젝트로 선폭 거리 채우기',
+    'Measure selected objects':'선택 오브젝트 깊이 측정',
+    'Fill this range from the selected mesh vertices using the active viewport camera. Distances are in cm. Click Apply to save.':'현재 뷰포트 카메라 기준으로 선택한 메시의 시작·종료 거리를 채웁니다. 단위는 cm이며 적용을 눌러 저장합니다.',
+}
+i18n.STRINGS.update(_measure_labels)
+i18n.ALIASES.update({ko:en for en,ko in _measure_labels.items()})
+tr=i18n.tr
 _dialogs=[]
 
 
@@ -15,8 +26,11 @@ def open_editor(node,hidden=False):
     dialog=QtWidgets.QDialog(parent);dialog.setObjectName('reaPencilDepthReduction')
     dialog.setWindowTitle(tr('Hidden depth reduction (CPU)' if hidden else 'Depth reduction (CPU)'))
     layout=QtWidgets.QVBoxLayout(dialog)
-    note=QtWidgets.QLabel(tr('Camera depth; two-endpoint Linear reduction. Final CPU render only.'))
+    note=QtWidgets.QLabel(tr('Camera depth: width reduction in normal preview and CPU render. Alpha reduction in CPU render only.'))
     note.setWordWrap(True);layout.addWidget(note)
+    measure_width_button=QtWidgets.QPushButton(tr('Fill width range from selection'));measure_width_button.setObjectName('measure_width_from_selection')
+    measure_width_button.setToolTip(tr('Fill this range from the selected mesh vertices using the active viewport camera. Distances are in cm. Click Apply to save.'))
+    layout.addWidget(measure_width_button)
     settings=graph.resolved_settings(node)
     if hidden:values=settings.get('hidden_style',{})
     else:
@@ -68,6 +82,25 @@ def open_editor(node,hidden=False):
                 frozen[c]=list(point);pending.pop(c,None);camera_mode.discard(c)
                 display.setText(tr('Reference snapshot (world): ')+', '.join(format(v,'.6g') for v in frozen[c]));control.setEnabled(False);status.clear()
             except (RuntimeError,ValueError,TypeError) as error:status.setText(tr(str(error)))
+        measure=None
+        if channel=='alpha':
+            measure=QtWidgets.QPushButton(tr('Measure selected objects'));measure.setObjectName('measure_selection_depth')
+            measure.setToolTip(tr('Fill this range from the selected mesh vertices using the active viewport camera. Distances are in cm. Click Apply to save.'))
+        def measure_selection(*_,g=group,c=channel,display=label,freeze_control=freeze_button):
+            try:
+                from .selection_depth import measure_selected
+                measured=measure_selected()
+                # Update fields only after a successful, complete read-only measurement.
+                g.findChild(QtWidgets.QDoubleSpinBox,'start').setValue(measured['start'])
+                g.findChild(QtWidgets.QDoubleSpinBox,'end').setValue(measured['end'])
+                g.setChecked(True);pending.pop(c,None);frozen.pop(c,None);camera_mode.add(c)
+                freeze_control.setEnabled(False)
+                display.setText(tr('Camera depth')+' | '+measured['camera'])
+                status.setText(tr('Measured camera: ')+measured['camera']+' | '+format(measured['start'],'.6f')+' ~ '+format(measured['end'],'.6f')+' cm')
+                if measured['padded']:status.setText(status.text()+' | '+tr('A small range was added because the selection has no depth span.'))
+            except (RuntimeError,ValueError,TypeError) as error:status.setText(tr(str(error)))
+        if measure is not None:measure.clicked.connect(measure_selection);form.addRow(measure)
+        if channel=='width':measure_width_button.clicked.connect(measure_selection)
         bind.clicked.connect(select_reference);use_camera.clicked.connect(camera);freeze_button.clicked.connect(freeze)
         form.addRow(bind,use_camera);form.addRow(freeze_button)
         layout.addWidget(group)

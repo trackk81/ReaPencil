@@ -6,6 +6,8 @@ uniform vec2 viewportSize : ViewportPixelSize;
 uniform vec4 eyeVector;
 uniform vec4 lineColor = {0,0,0,1};
 uniform float lineWidth = 1.5;
+uniform vec4 widthDepthReduction = {0,0,1,1};
+uniform mat4 worldView : WorldView;
 uniform vec2 viewportOrigin = {0,0};
 uniform bool scopeEnabled = false;
 uniform bool hasSceneDepth = false;
@@ -27,6 +29,7 @@ attribute VERTEXDATA {
     float objectId;
 };
 attribute FRAGMENTDATA {
+    vec3 lineWorldPosition;
     vec4 planeA;
     vec4 planeB;
     vec2 strip;
@@ -84,6 +87,7 @@ GLSLShader RTGeometry {
             p.xy+=side*p.w*sign;
             gl_Position=p;GS_OUT.planeA=pa;GS_OUT.planeB=pb;
             GS_OUT.strip=vec2(sign*(lineWidth+1.0)*.5,0.0);
+            GS_OUT.lineWorldPosition=mix(GS_IN[0].worldPosition,GS_IN[1].worldPosition,i<2?low:high);
             vec2 screenFirst=(first.xy/first.w*.5+.5)*viewportSize+viewportOrigin;
             GS_OUT.centerLine=vec3(perpendicular,-dot(perpendicular,screenFirst));
             EmitVertex();
@@ -101,7 +105,14 @@ GLSLShader RTPixel {
         return (z>=0.0 && z<=1.0)?z:fallback;
     }
     void main() {
-        float coverage=clamp((lineWidth+1.0)*.5-abs(PS_IN.strip.x),0.0,1.0);
+        float currentWidth=lineWidth;
+        if(widthDepthReduction.y>widthDepthReduction.x){
+            float depth=-(worldView*vec4(PS_IN.lineWorldPosition,1.0)).z;
+            float t=clamp((depth-widthDepthReduction.x)/(widthDepthReduction.y-widthDepthReduction.x),0.0,1.0);
+            currentWidth*=mix(widthDepthReduction.z,widthDepthReduction.w,t);
+            if(currentWidth<=0.0)discard;
+        }
+        float coverage=clamp((currentWidth+1.0)*.5-abs(PS_IN.strip.x),0.0,1.0);
         if(coverage<=0.0)discard;
         if(checkCenterDepth && hasSceneDepth){
             vec2 center=gl_FragCoord.xy-PS_IN.centerLine.xy*(dot(PS_IN.centerLine.xy,gl_FragCoord.xy)+PS_IN.centerLine.z)-.5;

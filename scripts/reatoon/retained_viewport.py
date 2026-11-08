@@ -24,6 +24,17 @@ _group_segment_counts={}
 MAX_RETAINED_GROUP_SEGMENTS=262144
 
 
+def _set_style(style_id,width,color):
+    _library.rt_style(style_id,width,color)
+    style=next((p['styles'][style_id-p['retained_style_offset']] for p in (_passes or []) if p.get('retained_style_offset',-1)<=style_id<p.get('retained_style_offset',-1)+len(p['styles'])),{})
+    curve=style.get('width_depth_reduction',[])
+    if curve and not style.get('width_reduction_origin'):
+        from .depth_reduction import validate
+        values=validate(curve)
+    else:values=[0.,0.,1.,1.]
+    _library.rt_style_depth(style_id,(c.c_float*4)(*values))
+
+
 def _begin_pass():
     _library.rt_begin_pass();_group_segment_counts.clear()
 
@@ -52,6 +63,7 @@ def bind(lib):
     lib.rt_add_retained.restype=c.c_int
     lib.rt_begin_pass.argtypes=[];lib.rt_begin_pass.restype=None
     lib.rt_style.argtypes=[c.c_uint,c.c_float,c.POINTER(c.c_float)];lib.rt_style.restype=None
+    lib.rt_style_depth.argtypes=[c.c_uint,c.POINTER(c.c_float)];lib.rt_style_depth.restype=None
     lib.rt_mode.argtypes=[c.c_int];lib.rt_mode.restype=None
     if hasattr(lib,'rt_reuse'):
         lib.rt_reuse.argtypes=[c.c_uint,c.c_uint];lib.rt_reuse.restype=None
@@ -120,7 +132,7 @@ def _draw_deferred(camera):
             parameters[:,:,3]=2*(mesh_id+1)
             style=styles[int(owner)];width=float(style.get('line_width',1.5))
             color=(c.c_float*3)(*style.get('line_color',[.04,.04,.07]))
-            _library.rt_style(offset+int(owner),width,color)
+            _set_style(offset+int(owner),width,color)
             _add_bounded(points,parameters,offset+int(owner),width,color)
             total+=len(points);batches+=1
     return total,batches
@@ -194,13 +206,13 @@ def _prepare(camera_name,aspect):
     if live.scene.get('merge_groups'):raise retained_geometry.UnsupportedRetained('Merge Groups use the legacy GPU viewport')
     if any(s.get(k) for item in _passes for s in item['styles'] for k in ('hidden_lines','dash_length','distance_reduction','width_variation','taper')):
         raise retained_geometry.UnsupportedRetained('Advanced brush styles use the legacy GPU viewport')
-    geometry_style_key=json.dumps([[{k:v for k,v in style.items() if k not in ('line_color','line_width')} for style in p['styles']] for p in _passes],sort_keys=True)
+    geometry_style_key=json.dumps([[{k:v for k,v in style.items() if k not in ('line_color','line_width','width_depth_reduction')} for style in p['styles']] for p in _passes],sort_keys=True)
     style_offset=0
     for item in _passes:
         item['retained_style_offset']=style_offset
         for i,style in enumerate(item['styles']):
             color=(c.c_float*3)(*style.get('line_color',[.04,.04,.07]))
-            _library.rt_style(style_offset+i,float(style.get('line_width',1.5)),color)
+            _set_style(style_offset+i,float(style.get('line_width',1.5)),color)
         style_offset+=len(item['styles'])
     if not rebuilt and not changed and not graph_dirty and geometry_style_key==_geometry_style_key:
         styles_by_offset={p['retained_style_offset']:p['styles'] for p in _passes}
@@ -223,7 +235,7 @@ def _prepare(camera_name,aspect):
             p=np.ascontiguousarray(points if len(unique)==1 else points[selected],np.float64)
             q=np.ascontiguousarray(parameters if len(unique)==1 else parameters[selected],np.float32)
             color=(c.c_float*3)(*style.get('line_color',[.04,.04,.07]))
-            _library.rt_style(item['retained_style_offset']+int(owner),float(style.get('line_width',1.5)),color)
+            _set_style(item['retained_style_offset']+int(owner),float(style.get('line_width',1.5)),color)
             _add_bounded(p,q,item['retained_style_offset']+int(owner),float(style.get('line_width',1.5)),color)
             total+=len(p);batch_count+=1
     if not live.empty:

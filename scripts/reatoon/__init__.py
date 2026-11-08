@@ -1,2 +1,2 @@
 """ReaPencil: independent Maya NPR rendering (legacy package name reatoon)."""
-__version__ = "0.8.53"
+__version__ = "0.8.56"
