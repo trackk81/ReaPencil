@@ -78,7 +78,7 @@ def bind(lib):
         lib.rt_edge_positions.argtypes=[c.c_void_p,c.c_void_p,c.c_uint,c.c_void_p,c.c_void_p];lib.rt_edge_positions.restype=None
     lib.rt_add.argtypes=[c.c_void_p,c.c_uint,c.c_float,c.POINTER(c.c_float),c.c_int,c.POINTER(c.c_float),c.c_int]
     lib.rt_add.restype=c.c_int
-    lib.rt_effect(str(Path(__file__).parent/'shaders/retained_lines.ogsfx').encode('utf-8'))
+    lib.rt_effect(str(Path(__file__).parent/'shaders/retained_lines172.ogsfx').encode('utf-8'))
     if hasattr(lib,'rt_scope'):
         lib.rt_scope.argtypes=[c.c_char_p,c.c_void_p,c.c_uint];lib.rt_scope.restype=None
         from . import view_scope

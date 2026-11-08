@@ -1,0 +1,165 @@
+#version 410
+// Independent retained line shader. All silhouette tests use the current view.
+uniform mat4 viewProjection : WorldViewProjection;
+uniform mat4 planeMatrix;
+uniform vec2 viewportSize : ViewportPixelSize;
+uniform vec4 eyeVector;
+uniform vec4 lineColor = {0,0,0,1};
+uniform float lineWidth = 1.5;
+uniform vec4 widthDepthReduction = {0,0,1,1};
+uniform vec4 alphaDepthReduction = {0,0,1,1};
+uniform mat4 worldView : WorldView;
+uniform vec2 viewportOrigin = {0,0};
+uniform bool scopeEnabled = false;
+uniform bool hasSceneDepth = false;
+uniform bool checkCenterDepth = true;
+uniform texture2D scopeTexture;
+uniform sampler2D scopeSampler = sampler_state { Texture = <scopeTexture>; TEXTURE_MIN_FILTER = NEAREST; TEXTURE_MAG_FILTER = NEAREST; TEXTURE_WRAP_S = CLAMP_TO_EDGE; TEXTURE_WRAP_T = CLAMP_TO_EDGE; };
+uniform texture2D sceneDepthTexture;
+uniform sampler2D sceneDepthSampler = sampler_state { Texture = <sceneDepthTexture>; TEXTURE_MIN_FILTER = NEAREST; TEXTURE_MAG_FILTER = NEAREST; TEXTURE_WRAP_S = CLAMP_TO_EDGE; TEXTURE_WRAP_T = CLAMP_TO_EDGE; };
+
+attribute APPDATA {
+    vec3 inPosition : POSITION;
+    vec4 normalA : TEXCOORD0;
+};
+attribute VERTEXDATA {
+    vec3 worldPosition;
+    vec3 faceA;
+    float active;
+    float dynamic;
+    float objectId;
+};
+attribute FRAGMENTDATA {
+    vec3 lineWorldPosition;
+    vec4 planeA;
+    vec4 planeB;
+    vec2 strip;
+    vec3 centerLine;
+};
+attribute PIXELDATA { vec4 outColor : COLOR0; };
+
+GLSLShader RTVertex {
+    void main() {
+        vec3 sight=eyeVector.xyz-inPosition*eyeVector.w;
+        bool a=dot(normalA.xyz,sight)>0.0;
+        VS_OUT.active=a?1.0:0.0;
+        int encoded=int(normalA.w+0.5);
+        VS_OUT.dynamic=float(encoded&1);VS_OUT.objectId=float(encoded>>1);
+        VS_OUT.worldPosition=inPosition;
+        VS_OUT.faceA=normalA.xyz;
+        gl_Position=viewProjection*vec4(inPosition,1);
+    }
+}
+GLSLShader RTGeometry {
+    layout(lines) in;
+    layout(triangle_strip,max_vertices=4) out;
+    bool clipPlane(float a,float b,inout float low,inout float high) {
+        if(a<0.0 && b<0.0)return false;
+        if(a<0.0)low=max(low,a/(a-b));
+        else if(b<0.0)high=min(high,a/(a-b));
+        return low<=high;
+    }
+    void main() {
+        if(lineWidth<=0.0)return;
+        if(scopeEnabled){
+            ivec2 dimensions=textureSize(scopeSampler,0);
+            for(int i=0;i<2;i++){
+                int owner=int(GS_IN[i].objectId);
+                if(texelFetch(scopeSampler,ivec2(owner%dimensions.x,owner/dimensions.x),0).r<0.5)return;
+            }
+        }
+        if(GS_IN[0].dynamic>0.5 && GS_IN[0].active==GS_IN[1].active)return;
+        vec4 a=gl_in[0].gl_Position,b=gl_in[1].gl_Position;
+        float low=0.0,high=1.0;
+        float mx=1.0+(lineWidth+2.0)/viewportSize.x,my=1.0+(lineWidth+2.0)/viewportSize.y;
+        if(!clipPlane(a.w+a.z,b.w+b.z,low,high)||!clipPlane(a.w-a.z,b.w-b.z,low,high))return;
+        if(!clipPlane(a.w*mx+a.x,b.w*mx+b.x,low,high)||!clipPlane(a.w*mx-a.x,b.w*mx-b.x,low,high))return;
+        if(!clipPlane(a.w*my+a.y,b.w*my+b.y,low,high)||!clipPlane(a.w*my-a.y,b.w*my-b.y,low,high))return;
+        vec4 first=mix(a,b,low),last=mix(a,b,high);
+        if(first.w<=1e-12 || last.w<=1e-12)return;
+        vec2 delta=(last.xy/last.w-first.xy/first.w)*viewportSize;
+        if(dot(delta,delta)<1e-12)return;
+        vec2 perpendicular=normalize(vec2(-delta.y,delta.x));
+        vec2 side=perpendicular*(lineWidth+1.0)/viewportSize;
+        vec4 pa=planeMatrix*vec4(GS_IN[0].faceA,-dot(GS_IN[0].faceA,GS_IN[0].worldPosition));
+        vec4 pb=planeMatrix*vec4(GS_IN[1].faceA,-dot(GS_IN[1].faceA,GS_IN[0].worldPosition));
+        for(int i=0;i<4;i++) {
+            vec4 p=i<2?first:last;float sign=(i%2)==0?1.0:-1.0;
+            p.xy+=side*p.w*sign;
+            gl_Position=p;GS_OUT.planeA=pa;GS_OUT.planeB=pb;
+            GS_OUT.strip=vec2(sign*(lineWidth+1.0)*.5,0.0);
+            GS_OUT.lineWorldPosition=mix(GS_IN[0].worldPosition,GS_IN[1].worldPosition,i<2?low:high);
+            vec2 screenFirst=(first.xy/first.w*.5+.5)*viewportSize+viewportOrigin;
+            GS_OUT.centerLine=vec3(perpendicular,-dot(perpendicular,screenFirst));
+            EmitVertex();
+        }
+        EndPrimitive();
+    }
+}
+GLSLShader RTPixel {
+    float depthAt(ivec2 pixel,ivec2 size) {
+        return texelFetch(sceneDepthSampler,clamp(pixel,ivec2(0),size-1),0).r;
+    }
+    float surfaceDepth(vec4 plane,vec2 xy,float fallback) {
+        if(abs(plane.z)<1e-7)return fallback;
+        float z=-(dot(plane.xy,xy)+plane.w)/plane.z*.5+.5;
+        return (z>=0.0 && z<=1.0)?z:fallback;
+    }
+    void main() {
+        bool reduceWidth=widthDepthReduction.y>widthDepthReduction.x;
+        bool reduceAlpha=alphaDepthReduction.y>alphaDepthReduction.x;
+        float depth=0.0;
+        if(reduceWidth || reduceAlpha)depth=-(worldView*vec4(PS_IN.lineWorldPosition,1.0)).z;
+        float alphaFactor=1.0;
+        if(reduceAlpha){
+            float t=clamp((depth-alphaDepthReduction.x)/(alphaDepthReduction.y-alphaDepthReduction.x),0.0,1.0);
+            alphaFactor=mix(alphaDepthReduction.z,alphaDepthReduction.w,t);
+            if(alphaFactor<=0.0)discard;
+        }
+        float currentWidth=lineWidth;
+        if(reduceWidth){
+            float t=clamp((depth-widthDepthReduction.x)/(widthDepthReduction.y-widthDepthReduction.x),0.0,1.0);
+            currentWidth*=mix(widthDepthReduction.z,widthDepthReduction.w,t);
+            if(currentWidth<=0.0)discard;
+        }
+        float coverage=clamp((currentWidth+1.0)*.5-abs(PS_IN.strip.x),0.0,1.0);
+        if(coverage<=0.0)discard;
+        if(checkCenterDepth && hasSceneDepth){
+            vec2 center=gl_FragCoord.xy-PS_IN.centerLine.xy*(dot(PS_IN.centerLine.xy,gl_FragCoord.xy)+PS_IN.centerLine.z)-.5;
+            ivec2 base=ivec2(floor(center)),size=textureSize(sceneDepthSampler,0);
+            // The line can be visible on either side of a depth discontinuity.
+            // Interpolating foreground/background depth would invent a blocker
+            // precisely at contact lines and silhouettes. Test the farthest
+            // actual surface sample in the center's one-pixel footprint.
+            float sceneZ=max(max(depthAt(base,size),depthAt(base+ivec2(1,0),size)),max(depthAt(base+ivec2(0,1),size),depthAt(base+ivec2(1,1),size)));
+            // Extrusion changes only x/y, so raster z is the center-line z.
+            float lineZ=gl_FragCoord.z;
+            // Bound depth quantization/float rounding, independent of scene scale.
+            float guard=max(2.0/16777215.0,2.0*abs(uintBitsToFloat(floatBitsToUint(lineZ)+1u)-lineZ));
+            // Resolved MSAA depth can come from an offset subsample.
+            // Bound the self-surface allowance to half a projected pixel.
+            float slopeA=abs(PS_IN.planeA.z)>1e-7?(abs(PS_IN.planeA.x)/viewportSize.x+abs(PS_IN.planeA.y)/viewportSize.y)/abs(PS_IN.planeA.z):0.0;
+            float slopeB=abs(PS_IN.planeB.z)>1e-7?(abs(PS_IN.planeB.x)/viewportSize.x+abs(PS_IN.planeB.y)/viewportSize.y)/abs(PS_IN.planeB.z):0.0;
+            guard += 0.5 * max(slopeA,slopeB);
+            if(lineZ>sceneZ+guard)discard;
+        }
+        vec2 xy=(gl_FragCoord.xy-viewportOrigin)/viewportSize*2.0-1.0;
+        // The center test already decides visibility against the scene depth.
+        // A second per-fragment hardware test clips the expanded strip on its own surface.
+        // With a sampleable target, visibility was already tested at the center line.
+        // The native state skips a redundant expanded-strip hardware depth test.
+        float z=gl_FragCoord.z;
+        if(!checkCenterDepth){
+            z=min(surfaceDepth(PS_IN.planeA,xy,z),surfaceDepth(PS_IN.planeB,xy,z));
+        }
+        gl_FragDepth=z>0.0?uintBitsToFloat(floatBitsToUint(z)-1u):z;
+        outColor=vec4(lineColor.rgb,lineColor.a*coverage*alphaFactor);
+    }
+}
+technique Main {
+    pass P0 {
+        VertexShader(in APPDATA,out VERTEXDATA VS_OUT)=RTVertex;
+        GeometryShader(in VERTEXDATA GS_IN,out FRAGMENTDATA GS_OUT)=RTGeometry;
+        PixelShader(in FRAGMENTDATA PS_IN,out PIXELDATA)=RTPixel;
+    }
+}
