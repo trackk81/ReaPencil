@@ -69,7 +69,7 @@ def validate_settings(values, partial=False):
     if not isinstance(values, dict):
         raise ValueError("Settings must be an object.")
     result = {} if partial else dict(DEFAULT_SETTINGS)
-    ranges = {"width": (16, 4096), "height": (16, 4096), "supersample": (1, 4),
+    ranges = {"width": (16, 2147483647), "height": (16, 2147483647), "supersample": (1, 4),
               "profile_split_angle": (0,180), "profile_loop_direction": (0,1), "profile_direction": (-360,360), "line_width": (0.1, 64), "line_opacity": (0, 1), "blend_mode": (0,15), "brush_size_scale": (0, 1), "crease_angle": (0, 180), "crease_angle_max": (0, 180),
               "intersection_tolerance": (1e-12, 0.01),
               "depth_bias": (0, 1), "distance_reduction": (0, 1000),
@@ -115,7 +115,7 @@ def validate_settings(values, partial=False):
         result[key] = value
     if not partial:
         from .render_limits import check_frame_samples
-        check_frame_samples(result['width'],result['height'],result['supersample'])
+        check_frame_samples(result['width'],result['height'],result['supersample'],check_memory=False)
     return result
 
 
@@ -531,7 +531,7 @@ def render_scene(output_prefix, camera=None, settings=None, write_scene=False, a
         from .render_limits import check_frame_samples
         from .line_graph import list_merge_groups
         check_frame_samples(values['width'],values['height'],ss)
-        prepass=dict(camera=renderer._camera(camera_data,w,h),depth=np.full((h,w),np.inf),
+        prepass=dict(consumable=True,camera=renderer._camera(camera_data,w,h),depth=np.full((h,w),np.inf),
                      planes=np.zeros((h,w,3)),owners=np.full((h,w),-1,np.int32) if list_merge_groups() else None,
                      counts=[],meshes=[],outlines=[])
     pending=[];depth_tasks=[]

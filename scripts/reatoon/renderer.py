@@ -736,11 +736,11 @@ def _png(path, data):
                      + chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b""))
 
 
-def _down(image, scale):
+def _down(image, scale, _full_size=None):
     if scale == 1:
         return image
     h, w, c = image.shape
-    if image.dtype==np.float32 and image.size>=65536:
+    if image.dtype==np.float32 and (image.size if _full_size is None else _full_size)>=65536:
         try:
             from .native_cpu import library,down_float32
             if library() is None:
@@ -808,10 +808,14 @@ def render(scene, output_prefix, settings=None, depth_prepass=None):
             if any(float(style.get(k,0))!=0 for k in ('distance_reduction','width_variation','taper')):
                 raise ValueError('Varying profiles with distance reduction, variation or taper are not implemented')
     width, height, ss = int(cfg["width"]), int(cfg["height"]), int(cfg["supersample"])
-    if not (1 <= width <= 4096 and 1 <= height <= 4096 and ss in (1, 2, 3, 4)):
-        raise ValueError("Resolution must be 1..4096 and supersample 1..4")
+    if not (width >= 1 and height >= 1 and ss in (1, 2, 3, 4)):
+        raise ValueError("Resolution must be positive and supersample 1..4")
     from .render_limits import check_frame_samples
-    check_frame_samples(width,height,ss)
+    # Peak depth/visibility phase: depth8 + planes24 + visible16 + conservative bounds8.
+    # Effects add two RGBA canvases; hidden output adds another. Depth prepass
+    # buffers already exist and must not be counted as a new allocation again.
+    frame_bytes=(56 if line_only else 128)+(32 if effect_layers else 0)+(16 if any(t.get('hidden_lines',False) for t in all_styles) else 0)
+    check_frame_samples(width,height,ss,bytes_per_sample=frame_bytes-(32 if depth_prepass is not None else 0))
     w, h = width * ss, height * ss
     camera = _camera(scene.get("camera", {}), w, h)
     if depth_prepass is not None:
@@ -1210,6 +1214,14 @@ def render(scene, output_prefix, settings=None, depth_prepass=None):
             if not local.get("output_to_elements_only", False):
                 stats["visible_segments" if vis else "hidden_segments"] += 1
     strokes_finished=time.perf_counter()
+    # Maya owns this single-use prepass. Release it before output conversion,
+    # while external callers' reusable prepasses retain their original lifetime.
+    auxiliary=cfg.get('auxiliary_outputs',True)
+    if depth_prepass is not None and depth_prepass.get('consumable',False):
+        depth_prepass.pop('planes',None);depth_prepass.pop('owners',None)
+        if not auxiliary:depth_prepass.pop('depth',None)
+    depth_planes=None;mesh_owners=None;group_image=None
+    if not auxiliary:depth=None
     # Normal brush amount applies once to the completed brush coverage.
     # Applying it to every capsule/edge would darken joins and crossings.
     if frame_opacity!=1.:
@@ -1232,13 +1244,23 @@ def render(scene, output_prefix, settings=None, depth_prepass=None):
               ("lines", ".svg"), ("eps", ".eps"), ("manifest", ".json")) if auxiliary or k in ('beauty','manifest')}
     raster_vectors=bool(profiles_active or effect_layers)
     raster_eps=bool(raster_vectors or frame_opacity!=1.)
-    _png(Path(paths["beauty"]), _white_matte_rgba(_down(beauty,ss)) if line_only else _down(beauty, ss))
+    streamed_output=width*height>=1048576
+    if streamed_output:
+        from .stream_image import scaled_png,depth_png,png_rows
+        scaled_png(Path(paths['beauty']),beauty,ss,_down,_white_matte_rgba if line_only else None)
+    else:_png(Path(paths["beauty"]), _white_matte_rgba(_down(beauty,ss)) if line_only else _down(beauty, ss))
     if auxiliary:
-        depth_img = np.where(np.isfinite(depth), np.clip(1 - (depth - camera["near"]) / (camera["far"] - camera["near"]), 0, 1), 0)
-        depth_img = np.repeat(depth_img[..., None], 3, axis=2)
-        _png(Path(paths['visible']), _straight(_down(visible, ss)))
-        _png(Path(paths['hidden']), _straight(_down(hidden, ss)) if hidden is not None else np.zeros((height,width,4),np.float32))
-        _png(Path(paths['depth']), _down(depth_img, ss))
+        if streamed_output:
+            scaled_png(Path(paths['visible']),visible,ss,_down,_straight)
+            if hidden is not None:scaled_png(Path(paths['hidden']),hidden,ss,_down,_straight)
+            else:png_rows(Path(paths['hidden']),width,height,4,(np.zeros((min(16,height-y),width,4),np.float32) for y in range(0,height,16)))
+            depth_png(Path(paths['depth']),depth,ss,camera,_down)
+        else:
+            depth_img = np.where(np.isfinite(depth), np.clip(1 - (depth - camera["near"]) / (camera["far"] - camera["near"]), 0, 1), 0)
+            depth_img = np.repeat(depth_img[..., None], 3, axis=2)
+            _png(Path(paths['visible']), _straight(_down(visible, ss)))
+            _png(Path(paths['hidden']), _straight(_down(hidden, ss)) if hidden is not None else np.zeros((height,width,4),np.float32))
+            _png(Path(paths['depth']), _down(depth_img, ss))
     svg = ['<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" viewBox="0 0 %d %d">' % (width, height, width, height)]
     if frame_opacity!=1.:svg.append('<g opacity="%.9g">'%frame_opacity)
     eps = ["%!PS-Adobe-3.0 EPSF-3.0", "%%%%BoundingBox: 0 0 %d %d" % (width, height), "1 setlinecap 1 setlinejoin"]
@@ -1312,6 +1334,7 @@ def render(scene, output_prefix, settings=None, depth_prepass=None):
             if element["file_type"] == "ai_eps":
                 warnings.append(element["name"] + ": standards-compliant EPS written; Illustrator-specific editable metadata is not implemented.")
         element_results.append(dict(name=element["name"], status="written", kind=element["kind"], path=str(path)))
+    stats['streamed_image_output']=streamed_output
     stats['output_mode']='lines_rgba' if line_only else 'shaded_rgb'
     if frame_opacity!=1.:stats['brush_opacity']=frame_opacity
     if line_only:stats['rgb_encoding']='white_matte_with_coverage_alpha'

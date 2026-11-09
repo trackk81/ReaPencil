@@ -110,8 +110,10 @@ def _display_image(path):
     from pathlib import Path
     import tempfile
     from PySide6.QtGui import QImage
-    native = Path(__file__).resolve().parents[2] / 'plug-ins' / cmds.about(version=True) / 'revToonImage.mll'
-    if not cmds.pluginInfo('revToonImage', query=True, loaded=True):
+    native = Path(__file__).resolve().parents[2] / 'plug-ins' / cmds.about(version=True) / 'reaPencilImage184.mll'
+    if not cmds.pluginInfo('reaPencilImage184', query=True, loaded=True):
+        if cmds.pluginInfo('revToonImage',query=True,loaded=True):
+            cmds.unloadPlugin('revToonImage')
         cmds.loadPlugin(str(native), quiet=True)
     image = QImage(str(path)).convertToFormat(QImage.Format_RGBA8888)
     if image.isNull():
@@ -254,9 +256,9 @@ def _resolution_field(attribute,label):
     field=cmds.intFieldGrp(label=label,numberOfFields=1,value1=int(cmds.getAttr(attribute)))
     def changed(*_):
         value=int(cmds.intFieldGrp(field,query=True,value1=True))
-        if not 16<=value<=4096:
+        if not 16<=value<=2147483647:
             cmds.intFieldGrp(field,edit=True,value1=int(cmds.getAttr(attribute)))
-            raise ValueError('ReaPencil image dimensions must be between 16 and 4096 pixels')
+            raise ValueError('ReaPencil image dimensions must be positive Maya integer values (at least 16 pixels)')
         cmds.undoInfo(openChunk=True,chunkName='ReaPencil resolution')
         try:
             cmds.setAttr(attribute,value)
@@ -346,8 +348,8 @@ def unregister():
         if _attribute('defaultRenderGlobals.currentRenderer') == RENDERER:
             cmds.setAttr('defaultRenderGlobals.currentRenderer', 'mayaSoftware', type='string')
         cmds.renderer(RENDERER, edit=True, unregisterRenderer=True)
-    if cmds.pluginInfo('revToonImage', query=True, loaded=True):
-        cmds.unloadPlugin('revToonImage')
+    for image_helper in ('reaPencilImage184','revToonImage'):
+        if cmds.pluginInfo(image_helper,query=True,loaded=True):cmds.unloadPlugin(image_helper)
     for helper in ('revToonMesh074','revToonMesh'):
         if cmds.pluginInfo(helper, query=True, loaded=True):
             cmds.unloadPlugin(helper)
