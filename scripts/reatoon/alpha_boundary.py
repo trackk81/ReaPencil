@@ -238,7 +238,7 @@ def _texture_fn(path,evaluated):
     return om.MFnMesh(source.generateSmoothMesh(owner,options)),owner
 
 
-def transform_mesh(mesh,path,evaluated,config):
+def transform_mesh(mesh,path,evaluated,config,_cell_cache=None):
     fn,owner=_texture_fn(path,evaluated)
     if fn.numVertices!=len(mesh['vertices']) or fn.numPolygons!=len(mesh['faces']):
         raise ValueError('Alpha UV topology differs from evaluated mesh: '+mesh['name'])
@@ -258,7 +258,15 @@ def transform_mesh(mesh,path,evaluated,config):
     for face in np.unique(tfaces):
         material=str(mesh['material_ids'][face]);source=sources.get('all',sources.get(material))
         if source is None:continue
-        cells,info=_cells(source,config);face_cells[int(face)]=cells;face_sources[int(face)]=source
+        if _cell_cache is None:cells,info=_cells(source,config)
+        else:
+            # A viewport export uses one immutable source/config per material.
+            # Scope this cache to that single transform so texture edits on a
+            # later rebuild still perform the original file-stat validation.
+            key=id(source)
+            if key not in _cell_cache:_cell_cache[key]=_cells(source,config)
+            cells,info=_cell_cache[key]
+        face_cells[int(face)]=cells;face_sources[int(face)]=source
         if info not in stats:stats.append(info)
         face_vertices=list(fn.getPolygonVertices(int(face)))
         maps[int(face)]={v:fn.getPolygonUV(int(face),i,uvset) for i,v in enumerate(face_vertices)}
@@ -273,6 +281,15 @@ def transform_mesh(mesh,path,evaluated,config):
     # material's UVs using another material's sampler.
     wrapping={bool(s.get('wrap',True)) for s in face_sources.values()}
     if len(wrapping)>1:raise ValueError('Use matching U/V wrap on alpha materials in one mesh')
+    if _cell_cache is not None:
+        # Viewport validation must fail before expensive clipping of preceding
+        # triangles. The strict CPU path and its ordering stay unchanged.
+        active=np.asarray([int(face) in face_cells for face in tfaces],bool)
+        values=np.asarray(uvs,np.float64)[active]
+        if len(values):
+            basis=np.stack((values[:,1]-values[:,0],values[:,2]-values[:,0]),axis=2)
+            if np.any(np.abs(np.linalg.det(basis))<1e-14):
+                raise ValueError('Alpha boundary requires non-degenerate UV triangles')
     cut=geometry.cut_mesh(mesh['vertices'],triangles,tfaces,uvs,face_cells,wrap=next(iter(wrapping),True))
     mapping=cut.pop('source_faces');bind=dict(ids=cut.pop('bind_ids'),weights=cut.pop('bind_weights'),
                                             source_vertex_count=len(mesh['vertices']))

@@ -344,7 +344,7 @@ def _line_membership(path, line_sets):
     return chosen, edges
 
 
-def export_scene(camera=None, settings=None, camera_override=None, include_normals=True, geometry_purpose="render", include_materials=True, as_arrays=False, mesh_filter=None, geometry_cache=None, mesh_ready=None, alpha_configuration=None):
+def export_scene(camera=None, settings=None, camera_override=None, include_normals=True, geometry_purpose="render", include_materials=True, as_arrays=False, mesh_filter=None, geometry_cache=None, mesh_ready=None, alpha_configuration=None, alpha_transform=None):
     from . import line_graph
     from .mesh_surface import mesh_function
     from . import smooth_geometry
@@ -493,7 +493,12 @@ def export_scene(camera=None, settings=None, camera_override=None, include_norma
             mesh["line_set"] = chosen
         if alpha_config:
             evaluated['purpose']=geometry_purpose
-            alpha_boundary.transform_mesh(mesh,path,evaluated,alpha_config)
+            if alpha_transform is None:
+                alpha_boundary.transform_mesh(mesh,path,evaluated,alpha_config)
+            else:
+                alpha_transform(mesh,path,evaluated,alpha_config)
+                if mesh.get('viewport_alpha_fallback'):
+                    warnings.append(mesh['viewport_alpha_fallback'])
             if not len(mesh['triangles']):
                 result['alpha_empty']=True
                 continue

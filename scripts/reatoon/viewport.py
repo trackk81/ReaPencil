@@ -184,6 +184,10 @@ def _watch_scene():
     from . import maya_scene
     from .mesh_surface import mesh_function,surface_input_changed
     _remove_callbacks(_node_callbacks)
+    # Saved helpers can already be enabled when a scene is opened, so the
+    # renderer need not call enable() again before its first frame.
+    for helper in cmds.ls(type=NODE_NAME,long=True) or []:
+        _protect_helper_selection(helper)
     names = set()
     for mesh in cmds.ls(type="mesh", long=True, allPaths=True) or []:
         names.add(mesh)
@@ -308,7 +312,7 @@ def _snapshot_for(camera_path, settings):
         started = time.perf_counter()
         from . import viewport_alpha
         snapshot = maya_scene.export_scene(camera_path.fullPathName(), settings,
-                                           camera_override=_camera_data(camera_path, 1.0), include_normals=False,alpha_configuration=viewport_alpha.configuration)
+                                           camera_override=_camera_data(camera_path, 1.0), include_normals=False,alpha_configuration=viewport_alpha.configuration,alpha_transform=viewport_alpha.transform_mesh)
         estimated = sum(len(m["vertices"]) * 176 + len(m.get("triangles", [])) * 192
                         + sum(64 + 36 * len(face) for face in m["faces"])
                         + len(m.get("hard_edges", [])) * 144 for m in snapshot["meshes"])
@@ -626,6 +630,11 @@ class ViewportNode(omui.MPxLocatorNode):
     def boundingBox(self):
         return om.MBoundingBox(om.MPoint(-1e8,-1e8,-1e8),om.MPoint(1e8,1e8,1e8))
 
+    def getShapeSelectionMask(self):
+        # The helper owns scene-wide line buffers and a deliberately huge bound;
+        # it is not a selectable modeling object.
+        return om.MSelectionMask()
+
 
 class ViewportDrawOverride(omr.MPxDrawOverride):
     def __init__(self, obj):
@@ -789,6 +798,15 @@ def unregister(plugin_fn):
         _gpu_scene=None
 
 
+def _protect_helper_selection(node):
+    # Reference display keeps the helper visible but excludes it from viewport
+    # picking, including retained/native render items. Touch only our shape,
+    # never the scene-wide locator selection mask or an arbitrary parent.
+    for attribute,value in (('overrideEnabled',True),('overrideDisplayType',2)):
+        plug=node+'.'+attribute
+        if cmds.getAttr(plug)!=value:cmds.setAttr(plug,value)
+
+
 def enable(_from_renderer=False):
     """Create one tiny helper locator, preserving the user's selection."""
     from . import fast_viewport
@@ -801,6 +819,7 @@ def enable(_from_renderer=False):
     nodes = cmds.ls(type=NODE_NAME, long=True) or []
     if nodes:
         for node in nodes:
+            _protect_helper_selection(node)
             cmds.setAttr(node + ".linePreviewEnabled", True)
             cmds.setAttr(node + ".visibility", True)
         _invalidate()
@@ -817,6 +836,7 @@ def enable(_from_renderer=False):
         for channel in ("tx", "ty", "tz", "rx", "ry", "rz", "sx", "sy", "sz"):
             cmds.setAttr(transform + "." + channel, lock=True, keyable=False, channelBox=False)
         node = cmds.listRelatives(transform, shapes=True, fullPath=True)[0]
+        _protect_helper_selection(node)
         if selection:
             cmds.select(selection, replace=True)
         else:

@@ -76,7 +76,7 @@ class LiveScene:
         self.scene = maya_scene.export_scene(camera_path.fullPathName(),settings,camera_override=camera,
                                             include_normals=False,geometry_purpose='viewport',
                                             include_materials=False,as_arrays=True,
-                                            mesh_filter=None if retained else camera.get('_viewport_mesh_filter'),geometry_cache=geometry_cache,alpha_configuration=viewport_alpha.configuration)
+                                            mesh_filter=None if retained else camera.get('_viewport_mesh_filter'),geometry_cache=geometry_cache,alpha_configuration=viewport_alpha.configuration,alpha_transform=viewport_alpha.transform_mesh)
         exported=time.perf_counter()
         self.empty=not self.scene['meshes']
         if retained and len(self.scene['meshes'])<=256:
