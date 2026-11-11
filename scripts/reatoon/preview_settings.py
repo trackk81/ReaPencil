@@ -4,6 +4,7 @@ WINDOW='reaPencilPreviewPerformance'
 SMOOTH='reaPencilPreviewSmoothLines'
 INTERSECTIONS='reaPencilPreviewIntersections'
 PROFILES='reaPencilPreviewStrokeProfiles'
+BRUSH_NAVIGATION='reaPencilPreviewBrushNavigation'
 
 def alpha_failures():
     """Current preview diagnostics only; never rebuild or evaluate geometry."""
@@ -69,12 +70,15 @@ def rebuild():
 
 def set_option(name,enabled):
     from . import viewport_alpha
-    if name not in (SMOOTH,INTERSECTIONS,PROFILES,viewport_alpha.OPTION):raise ValueError('Unknown viewport preference')
+    if name not in (SMOOTH,INTERSECTIONS,PROFILES,BRUSH_NAVIGATION,viewport_alpha.OPTION):raise ValueError('Unknown viewport preference')
     cmds.optionVar(intValue=(name,int(bool(enabled))))
     if name==viewport_alpha.OPTION:
         from . import viewport
         viewport._watchers_stale=True
-    if name==PROFILES:
+    if name in (PROFILES,BRUSH_NAVIGATION):
+        if name==BRUSH_NAVIGATION:
+            from . import preview_brush_navigation
+            preview_brush_navigation.reset()
         from . import viewport
         viewport._gpu_style_dirty=True;viewport._generation+=1
         viewport.request_refresh();cmds.refresh(force=True)
@@ -84,7 +88,7 @@ def show():
     from . import i18n
     def label(en,ko):return en if i18n.language()=='en' else ko
     if cmds.window(WINDOW,exists=True):cmds.deleteUI(WINDOW)
-    cmds.window(WINDOW,title=label('ReaPencil — Preview Performance','ReaPencil — 프리뷰 성능 설정'),widthHeight=(460,500),sizeable=False)
+    cmds.window(WINDOW,title=label('ReaPencil — Preview Performance','ReaPencil — 프리뷰 성능 설정'),widthHeight=(460,590),sizeable=False)
     cmds.columnLayout(adjustableColumn=True,rowSpacing=12)
     cmds.text(label=label('Viewport calculation only. Edit line styles in the Line Window.','뷰포트 계산 전용입니다. 선 스타일은 라인 창에서 편집하세요.'),align='left',wordWrap=True,height=36)
     cmds.checkBox('reaPencilPreviewSmoothControl',label=label('Smooth line geometry with the viewport mesh','뷰포트 메시의 스무스를 선에도 적용'),value=load()['enabled_smooth_mesh'],changeCommand=lambda v:set_option(SMOOTH,v))
@@ -92,6 +96,8 @@ def show():
     cmds.checkBox('reaPencilPreviewIntersectionControl',label=label('Allow object/self intersections (slower)','교차선·자체 교차선 계산 허용 (속도 비용 있음)'),value=value(INTERSECTIONS,True),changeCommand=lambda v:set_option(INTERSECTIONS,v))
     cmds.checkBox('reaPencilPreviewProfileControl',label=label('Show stroke width and alpha profiles','선폭·알파 곡선 표시'),value=value(PROFILES,True),changeCommand=lambda v:set_option(PROFILES,v))
     cmds.text(label=label('Turn off to save stroke-connection work in complex scenes. CPU output is unchanged.','복잡한 장면에서 끄면 획 연결 계산을 줄입니다. CPU 렌더는 그대로 유지됩니다.'),align='left',wordWrap=True,height=32)
+    cmds.checkBox('reaPencilPreviewBrushNavigationControl',label=label('Keep camera navigation smooth with brush strokes and dashes','붓 스트로크·대시 사용 중 카메라 이동 최적화'),value=value(BRUSH_NAVIGATION,True),changeCommand=lambda v:set_option(BRUSH_NAVIGATION,v))
+    cmds.text(label=label('Reuse brush/dash detail while navigating; refresh the exact view after stopping. CPU output is unchanged.','이동 중 붓·대시 표시를 재사용하고 멈추면 현재 시점의 상세 표시로 갱신합니다. CPU 렌더는 유지됩니다.'),align='left',wordWrap=True,height=42)
     from . import viewport_alpha
     cmds.checkBox('reaPencilPreviewAutoAlphaControl',label=label('Detect alpha boundaries from materials','재질 알파 경계 자동 인식'),value=viewport_alpha.enabled(),changeCommand=lambda v:set_option(viewport_alpha.OPTION,v))
     cmds.button(label=label('List meshes with alpha errors','알파 오류 메시 목록'),command=lambda *_:show_alpha_failures())

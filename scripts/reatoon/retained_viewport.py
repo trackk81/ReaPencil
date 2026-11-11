@@ -87,6 +87,8 @@ def _add_bounded(points,parameters,style_id,width,color):
 
 def bind(lib):
     global _library,_mode,_key,_device_error,_fallback_generation
+    from . import preview_brush_navigation
+    preview_brush_navigation.reset()
     _mode=None;_key=None;_device_error=None;_fallback_generation=-1
     _library=lib
     lib.rt_effect.argtypes=[c.c_char_p];lib.rt_effect.restype=None
@@ -134,6 +136,8 @@ def _switch(mode):
 
 def _fallback(camera_name,aspect,reason,destination=''):
     global _fallback_generation,_fallback_reason
+    from . import preview_brush_navigation
+    preview_brush_navigation.reset()
     _switch('legacy');vp._native_prepare(camera_name,aspect,destination)
     _fallback_generation=vp._generation;_fallback_reason=reason
     vp._last_report['retained_fallback_reason']=reason
@@ -189,9 +193,11 @@ def _prepare(camera_name,aspect,destination=""):
     global _fixed_group_count,_fixed_segments,_fixed_batches
     global _fixed_profile_payload
     global _surface_neighbor_payload
-    from . import surface_lines
+    from . import surface_lines,preview_brush_navigation as navigation
     started=time.perf_counter()
     key=(vp._generation,vp._gpu_rebuild,vp._gpu_graph_dirty,vp._gpu_style_dirty,surface_lines.preview_revision(),_preset_token(camera_name,aspect,destination))
+    navigation.observe(key)
+    if _key==key:navigation.at_exact(key)
     if _key==key and not _deferred_entries:
         vp._last_report.update(prepare_ms=(time.perf_counter()-started)*1000,
                                geometry_updated=False,retained_geometry_reused=True)
@@ -200,6 +206,11 @@ def _prepare(camera_name,aspect,destination=""):
     camera_key=(tuple(camera['position']),tuple(camera['target']),camera['projection'])
     preset_motion=_key is not None and _key[-1]!=key[-1]
     preset_camera=_preset_camera(camera,aspect,destination)
+    if _key is not None and key!=_key and key[:-1]==_key[:-1] and not _deferred_entries and navigation.reuse(key,_passes,preset_camera,destination):
+        vp._last_report.update(prepare_ms=(time.perf_counter()-started)*1000,geometry_updated=False,
+                               retained_geometry_reused=True,brush_detail_state='navigation_cached',
+                               brush_navigation_statistics=dict(navigation.stats))
+        return
     if _key==key:
         if camera_key==_deferred_camera_key:
             vp._last_report.update(prepare_ms=(time.perf_counter()-started)*1000,
@@ -219,6 +230,7 @@ def _prepare(camera_name,aspect,destination=""):
             if not cmds.getAttr(n+'.lineGraphMode'):cmds.setAttr(n+'.lineGraphMode',True)
     if vp._graph_mode and not lines:
         _library.rt_begin();_library.rt_end();_key=key
+        navigation.reset()
         vp._last_report=dict(state='ready',backend='retained_gpu',segments=0,submitted_segments=0,reason='empty_line_graph')
         return
     if vp._watchers_stale:vp._watch_scene()
@@ -299,12 +311,13 @@ def _prepare(camera_name,aspect,destination=""):
     # geometry signature. Those fresh passes have no native range/cache map.
     reuse=(partial and (changed or bool(drawing_dirty)) and not rebuilt and not graph_dirty and not preset_motion and geometry_style_key==_geometry_style_key
            and all(all(k in p for k in ('edge_cache','edge_ranges','deferred_cache')) for p in _passes if p['styles']))
+    navigation.begin(key,_passes)
     _library.rt_begin();total=0;edge_total=0;cross_total=0;batch_count=0;pass_reports=[]
     _deferred_entries=[]
     def submit(points,parameters,styles,owners,vertices=None,flags=None,outline_eligible=None):
         global _profile_payload,_surface_neighbor_payload,_fixed_profile_payload
         nonlocal total,batch_count
-        points,parameters,owners,vertices,flags,outline_eligible,preset_u=_expand_presets(points,parameters,owners,styles,preset_camera,vertices,flags,outline_eligible)
+        points,parameters,owners,vertices,flags,outline_eligible,preset_u=navigation.expansion(_expand_presets,(points,parameters,owners,styles,preset_camera,vertices,flags,outline_eligible),_fixed_profile_payload)
         unique=np.unique(owners)
         for owner in unique:
             style=styles[int(owner)]
@@ -408,12 +421,14 @@ def _prepare(camera_name,aspect,destination=""):
     native_groups=_library.rt_group_count();_library.rt_end()
     _geometry_style_key=geometry_style_key
     _key=(vp._generation,vp._gpu_rebuild,vp._gpu_graph_dirty,vp._gpu_style_dirty,surface_lines.preview_revision(),_preset_token(camera_name,aspect,destination))
+    navigation.end(_key)
     vp._last_report=dict(state='ready',backend='retained_gpu',segments=total,submitted_segments=total,
         edge_candidates=edge_total,intersection_segments=cross_total,batches=batch_count,
         mesh_count=len(live.scene['meshes']),triangles=sum(len(m['triangles']) for m in live.scene['meshes']),
         smooth_mesh_count=sum(m.get('smooth_level',0)>0 for m in live.scene['meshes']),
         geometry_generation=vp._generation,geometry_updated=changed,prepare_ms=(time.perf_counter()-started)*1000,
-        camera_classification='GPU shader on every frame',intersection_diagnostics=pass_reports)
+        camera_classification='GPU shader on every frame',intersection_diagnostics=pass_reports,
+        brush_detail_state='exact',brush_navigation_statistics=dict(navigation.stats))
     if any(s.get(k,0) for item in _passes for s in item['styles'] for k in ('taper','width_variation')):
         vp._last_report['warnings']=['Taper and width variation are CPU render only; stroke profiles apply to normal preview.']
     vp._last_report.update(exceptional_edges=sum(len(d['owners']) for d,_,_,_ in _deferred_entries),
@@ -442,6 +457,9 @@ def _expand_presets(points,parameters,owners,styles,camera,vertices,flags,outlin
     from .stroke_presets import active,expand,domains,variant_owner
     if camera is None or not any(active(styles[int(i)]) for i in np.unique(owners)):
         return points,parameters,owners,vertices,flags,outline,None
+    if any(styles[int(i)].get('line_pattern')!=7 and (int(styles[int(i)].get('brush_preset',0)) in (1,2,3) or styles[int(i)].get('line_pattern')==1 and not styles[int(i)].get('brush_preset')) for i in np.unique(owners)):
+        from .preview_brush_batch import retained as batch
+        return batch(points,parameters,owners,styles,camera,flags,outline,_fixed_profile_payload)
     spans={}
     for owner in np.unique(owners):
         ids=np.flatnonzero(owners==owner)
