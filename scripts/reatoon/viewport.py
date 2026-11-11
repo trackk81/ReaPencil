@@ -140,6 +140,7 @@ def _attribute_changed(message, *args):
             elif kind in ('revToonLine','revToonLineSet','revToonRenderElement','objectSet','shadingEngine') or name=='revToonMergeGroup':
                 _gpu_graph_dirty=True
                 request_refresh(graph_changed=True)
+            if kind=='network' and cmds.attributeQuery('reaPencilSurfaceStroke',node=om.MFnDependencyNode(plug.node()).name(),exists=True):_scene_changed()
             if kind=='shadingEngine' or (kind=='objectSet' and cmds.attributeQuery('reaToonKind',node=om.MFnDependencyNode(plug.node()).name(),exists=True)):
                 _gpu_rebuild=True;_smooth_rebuild_only=False
             if name in ('reaPencilAlphaBoundary','uvSet','uvPivot','visibility','intermediateObject','edgeSmoothing','enabledSmoothMesh',
@@ -211,6 +212,9 @@ def _watch_scene():
         for source in sources.values():
             alpha_names.update((source['file_node'],source['shader']))
             alpha_names.update(cmds.listConnections(source['file_node'],source=True,destination=False,type='place2dTexture') or [])
+    from . import surface_lines
+    surface_nodes=set(surface_lines.nodes())
+    names.update(surface_nodes)
     names.update(alpha_names)
     names.update(cmds.ls(type="shadingEngine") or [])
     # A merge group can contain existing/nested sets whose membership changes
@@ -233,6 +237,7 @@ def _watch_scene():
                 continue
             seen.add(key)
             if name in alpha_names:_alpha_dependency_hashes.add(key)
+            if name in surface_nodes:_node_callbacks.append(om.MNodeMessage.addNodePreRemovalCallback(obj,_scene_changed))
             _node_callbacks.append(om.MNodeMessage.addNodeDirtyCallback(obj, _invalidate))
             _node_callbacks.append(om.MNodeMessage.addAttributeChangedCallback(obj, _attribute_changed))
             if obj.hasFn(om.MFn.kMesh):
@@ -715,7 +720,7 @@ def register(plugin_fn):
     global _registered, _native_lib, _native_plugin, _retained_native, DRAW_CLASSIFICATION
     from pathlib import Path
     native_dir=Path(__file__).resolve().parents[2]/'plug-ins'/cmds.about(version=True)
-    retained=native_dir/'reaPencilDraw180.mll'
+    retained=native_dir/'reaPencilDraw190.mll'
     if not retained.is_file():retained=native_dir/'reaPencilDraw088.mll'
     if not retained.is_file():retained=native_dir/'reaPencilDraw087.mll'
     if not retained.is_file():retained=native_dir/'reaPencilDraw084.mll'
@@ -730,8 +735,8 @@ def register(plugin_fn):
         if (native.is_file() and os.environ.get('REVTOON_VIEWPORT_BACKEND','gpu')!='cpu'
                 and os.environ.get('REVTOON_NATIVE_DRAW','1')!='0'):
             import ctypes as c
-            if native.stem in ('reaPencilDraw087','reaPencilDraw088','reaPencilDraw090','reaPencilDraw163','reaPencilDraw170','reaPencilDraw171','reaPencilDraw172','reaPencilDraw180'):
-                for previous in ('reaPencilDraw084','reaPencilDraw087','reaPencilDraw088','reaPencilDraw090','reaPencilDraw163','reaPencilDraw170','reaPencilDraw171','reaPencilDraw172'):
+            if native.stem in ('reaPencilDraw087','reaPencilDraw088','reaPencilDraw090','reaPencilDraw163','reaPencilDraw170','reaPencilDraw171','reaPencilDraw172','reaPencilDraw180','reaPencilDraw190'):
+                for previous in ('reaPencilDraw084','reaPencilDraw087','reaPencilDraw088','reaPencilDraw090','reaPencilDraw163','reaPencilDraw170','reaPencilDraw171','reaPencilDraw172','reaPencilDraw180','reaPencilDraw190'):
                     if previous==native.stem:continue
                     if cmds.pluginInfo(previous,q=True,registered=True) and cmds.pluginInfo(previous,q=True,loaded=True):
                         if not cmds.pluginInfo(previous,q=True,unloadOk=True):raise RuntimeError('Restart Maya to update the GPU viewport module.')

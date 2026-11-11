@@ -10,6 +10,9 @@ from maya import cmds
 from maya.api import OpenMaya as om
 
 DEFAULT_SETTINGS = {
+    "line_image": {}, "brush_image": {}, "brush_stamp_spacing": 24.0,
+    "brush_roughness": 1.0, "brush_density": 1.0, "brush_width_scale": 1.0,
+    "line_pattern": 0, "brush_preset": 0, "pattern_period": 20.0, "pattern_amplitude": 3.0,
     "enabled_smooth_mesh": False,
     "relative_line_size": False,
     "connect_collinear_dashes": False,
@@ -69,7 +72,7 @@ def validate_settings(values, partial=False):
     if not isinstance(values, dict):
         raise ValueError("Settings must be an object.")
     result = {} if partial else dict(DEFAULT_SETTINGS)
-    ranges = {"width": (16, 2147483647), "height": (16, 2147483647), "supersample": (1, 4),
+    ranges = {"brush_stamp_spacing": (2,10000),"brush_roughness": (0,3), "brush_density": (0,1), "brush_width_scale": (.1,3),"line_pattern": (0,7), "brush_preset": (0,4), "pattern_period": (2,10000), "pattern_amplitude": (0,1000),"width": (16, 2147483647), "height": (16, 2147483647), "supersample": (1, 4),
               "profile_split_angle": (0,180), "profile_loop_direction": (0,1), "profile_direction": (-360,360), "line_width": (0.1, 64), "line_opacity": (0, 1), "blend_mode": (0,15), "brush_size_scale": (0, 1), "crease_angle": (0, 180), "crease_angle_max": (0, 180),
               "intersection_tolerance": (1e-12, 0.01),
               "depth_bias": (0, 1), "distance_reduction": (0, 1000),
@@ -79,7 +82,10 @@ def validate_settings(values, partial=False):
         if key not in DEFAULT_SETTINGS:
             raise ValueError("Unknown setting: " + str(key))
         default = DEFAULT_SETTINGS[key]
-        if key in ("feature_brushes","hidden_style"):
+        if key in ("line_image","brush_image"):
+            from .png_pattern import validate
+            value=validate(value)
+        elif key in ("feature_brushes","hidden_style"):
             from .brush_channels import validate_nested
             value=validate_nested(value,validate_settings,hidden=key=="hidden_style")
         elif key in ('alpha_reduction_origin','width_reduction_origin'):
@@ -377,6 +383,8 @@ def export_scene(camera=None, settings=None, camera_override=None, include_norma
             warnings.append("Only the first visible directional light is used; other lights are ignored.")
     elif include_materials:
         warnings.append("No directional light: using the ReaToon preview light.")
+    from . import surface_lines
+    surface_records=surface_lines.records()
     native_ready=False;shader_cache={}
     global_smooth_type=cmds.optionVar(query='globalPolyDefaultSmoothDrawType') if geometry_purpose=='render' else None
     for name in cmds.ls(type="mesh", long=True, allPaths=True) or []:
@@ -404,13 +412,13 @@ def export_scene(camera=None, settings=None, camera_override=None, include_norma
                     shader_cache[sg_name]=sources[0] if sources else ""
                 shader_names.append(shader_cache[sg_name])
             passes, selected = line_graph.resolve_mesh(path, source_fn.numPolygons, shader_names, ids, graph)
-        uniform=(geometry_purpose=='render' and not need_edge_provenance and not alpha_config
+        uniform=(geometry_purpose=='render' and not need_edge_provenance and not alpha_config and not surface_records.get(name)
                  and (not len(ids) or (ids.min()==ids.max() if isinstance(ids,np.ndarray) else min(ids)==max(ids)))
                  and all(len(set(item['face_line_sets']))<=1 for item in (passes or [])))
         evaluated=None
-        cached=(geometry_cache or {}).get(name) if geometry_purpose=='viewport' and as_arrays and not need_edge_provenance and not alpha_config else None
+        cached=(geometry_cache or {}).get(name) if geometry_purpose=='viewport' and as_arrays and not need_edge_provenance and not alpha_config and not surface_records.get(name) else None
         if cached is not None:evaluated=cached['geometry']
-        if evaluated is None and as_arrays and not need_edge_provenance and not include_normals and not alpha_config:
+        if evaluated is None and as_arrays and not need_edge_provenance and not include_normals and not alpha_config and not surface_records.get(name):
             from . import native_mesh
             try:
                 if not native_ready:native_mesh.load();native_ready=True
@@ -424,8 +432,8 @@ def export_scene(camera=None, settings=None, camera_override=None, include_norma
                 if 'exporter is unavailable' not in str(error):raise
                 warnings.append(str(error)+'; using Maya Python geometry evaluation')
         if evaluated is None:
-            evaluated = smooth_geometry.evaluate(path, settings["enabled_smooth_mesh"], geometry_purpose,
-                                                 need_edge_provenance=need_edge_provenance or bool(alpha_config),as_arrays=as_arrays)
+            evaluated = smooth_geometry.evaluate(path, settings["enabled_smooth_mesh"] or bool(surface_records.get(name)), geometry_purpose,
+                                                 need_edge_provenance=need_edge_provenance or bool(alpha_config) or bool(surface_records.get(name)),as_arrays=as_arrays)
         fn = evaluated.get("fn")
         faces=evaluated.get('faces')
         if faces is None:
@@ -491,6 +499,7 @@ def export_scene(camera=None, settings=None, camera_override=None, include_norma
             mesh["line_passes"] = smooth_geometry.remap_passes(mesh, passes)
         elif chosen:
             mesh["line_set"] = chosen
+        surface_lines.attach(mesh,evaluated,surface_records.get(name,[]),warnings)
         if alpha_config:
             evaluated['purpose']=geometry_purpose
             if alpha_transform is None:

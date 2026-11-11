@@ -212,6 +212,9 @@ class LiveScene:
                 self.smooth_inputs[i]=current
             else:
                 world=_raw_world(fn,path)
+            if self.scene['meshes'][i].get('_surface_strokes'):
+                from .surface_strokes import update
+                update(self.scene['meshes'][i],world)
             if self.scene['meshes'][i].get('alpha_boundary'):
                 from .alpha_boundary import deform
                 world=deform(self.scene['meshes'][i],world)

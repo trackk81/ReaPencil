@@ -22,6 +22,7 @@ from .intersections import find_intersections, find_render_intersections
 
 
 DEFAULTS = dict(width=640, height=480, supersample=2, background=[1, 1, 1],
+                line_image={}, brush_image={}, brush_stamp_spacing=24., line_pattern=0, brush_preset=0, brush_roughness=1., brush_density=1., brush_width_scale=1., pattern_period=20., pattern_amplitude=3.,
                 line_width=1.5, line_color=[0.04, 0.04, 0.07], hidden_lines=False,
                 feature_brushes={}, hidden_style={},
                 hidden_color=[0.5, 0.5, 0.6], outline=True, open_edges=True,
@@ -480,6 +481,8 @@ def line_style_passes(scene, settings=None):
     for mesh in meshes:
         for item in mesh.get("line_passes", []):
             lines[item["line"]] = item["priority"]
+    for mesh in meshes:
+        for stroke in mesh.get('_surface_strokes',[]):lines.setdefault(stroke['line'],0)
     result = []
     for line, priority in sorted(lines.items(), key=lambda item: (item[1], item[0])):
         assignments = []
@@ -494,16 +497,22 @@ def line_style_passes(scene, settings=None):
             selected_edges.append(item.get("selected_edges", {}) if item else {})
         unique_assignments=[set(values) for values in assignments]
         keys = sorted({key for values in unique_assignments for key in values if key is not None}
-                      | {key for values in selected_edges for key, pairs in values.items() if pairs},
+                      | {key for values in selected_edges for key, pairs in values.items() if pairs}
+                      | {s['style'] for m in meshes for s in m.get('_surface_strokes',[]) if s['line']==line},
                       key=lambda key: (table.get(key, {}).get("_order", 0), key))
         indices = {key: i for i, key in enumerate(keys)}
         result.append(dict(line=line, priority=priority,
-                           styles=[resolve(table.get(key, {})) for key in keys],
+                           styles=[resolve(table.get(key, {})) for key in keys],style_nodes=keys,
                            selected_edges=[{indices[key]: pairs for key, pairs in values.items() if key in indices}
                                            for values in selected_edges],
                            face_style_ids=[np.full(len(values),indices.get(next(iter(unique)),-1),np.int32) if len(unique)==1 else
                                            np.asarray([indices.get(key,-1) for key in values],dtype=np.int32)
                                            for values,unique in zip(assignments,unique_assignments)]))
+    if any(m.get('_surface_strokes') for m in meshes):
+        from .surface_strokes import configure_passes
+        configure_passes(scene,result,table,resolve)
+    from .stroke_presets import configure_passes
+    configure_passes(result)
     return result
 
 
@@ -677,6 +686,9 @@ def world_line_segments(scene, settings=None, intersections=None, prepared_edges
                 segments.append(dict(a=intersection["a"], b=intersection["b"], features=["intersection"],
                                      mesh_index=index, mesh=meshes[index].get("name", "mesh"),
                                      settings=child, mesh_indices=intersection["mesh_indices"], line=item["line"]))
+    if any(m.get('_surface_strokes') for m in meshes):
+        from .surface_strokes import append
+        append(scene,passes,segments)
     return dict(segments=segments, warnings=warnings, intersection_diagnostics=diagnostic,
                 certified_hidden_edges=(sum(int(np.count_nonzero(~keep)) for keep in edge_keep+diagonal_keep)
                                         if edge_keep is not None else 0))
@@ -788,6 +800,7 @@ def render(scene, output_prefix, settings=None, depth_prepass=None):
     effect_layers=brush_effects.required(all_styles)
     complex_profiles=any(s.get('width_profile') or s.get('alpha_profile') or s.get('line_opacity',1.)!=1. for parent in all_styles for s in brush_effects.leaves(parent))
     if complex_profiles and (scene.get('merge_groups') or any(e.get('active',True) and e.get('kind','line') in ('line','eps') for e in scene.get('render_elements',[]))):effect_layers=True
+    if any(m.get('_surface_strokes') for m in scene.get('meshes',[])) and len(all_styles)>1 and any(s.get('line_opacity',1.)!=1. for s in all_styles):effect_layers=True
     opacities=[float(s.get('line_opacity',1.)) for s in all_styles]
     if any(not math.isfinite(v) or not 0<=v<=1 for v in opacities):
         raise ValueError('Brush opacity must be finite and in 0..1')
@@ -1013,6 +1026,8 @@ def render(scene, output_prefix, settings=None, depth_prepass=None):
     if edge_masks is not None:stats['certified_hidden_edges']=line_data['certified_hidden_edges']
     geometry_finished=time.perf_counter()
     remaining_segments=line_data['segments']
+    from .stroke_presets import cpu_segments
+    remaining_segments=cpu_segments(remaining_segments,camera,ss)
     effect_beauty=None
     if effect_layers:
         if not line_only:

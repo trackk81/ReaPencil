@@ -160,6 +160,11 @@ def render_packed(packed,camera,depth,planes,visible,ss,visibility=None,union_co
     else:
         status=lib.rp_profile_coordinates(points.ctypes.data,world.ctypes.data,keys.ctypes.data,vertices.ctypes.data,angles.ctypes.data,n,camera['width'],camera['height'],int(camera['ortho']),camera['span'],camera['focal'],u.ctypes.data)
         if status:raise RuntimeError('Native profile topology allocation failed')
+        start=0
+        for part in packed.parts:
+            end=start+part['count']
+            if 'profile_u' in part:u[start:end]=part['profile_u']
+            start=end
     if retain_coordinates:
         start=0
         for part in packed.parts:

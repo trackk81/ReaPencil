@@ -209,6 +209,9 @@ def show():
         button.clicked.connect(lambda checked=False, fn=callback: _safe(fn))
         row.addWidget(button)
     body.addLayout(row)
+    from . import surface_lines,i18n
+    surface_button=QtWidgets.QPushButton('Draw on Mesh (Test)' if i18n.language()=='en' else '메시 위에 선 그리기 (테스트)')
+    surface_button.setObjectName('reaPencilDrawOnMesh');surface_button.clicked.connect(lambda *_:_safe(surface_lines.show));body.addWidget(surface_button)
     priority_row = QtWidgets.QHBoxLayout()
     priority_row.addWidget(QtWidgets.QLabel(tr('Render Priority')))
     _priority_spin = QtWidgets.QSpinBox()
@@ -311,6 +314,8 @@ def _set_changed(ctx):
                      changeCommand=lambda *_:_defer_rename_set(ctx,node,cmds.textFieldGrp(name_control,query=True,text=True)))
     cmds.checkBox(label=tr('On'), value=_active(node), changeCommand=lambda value: _safe(graph.set_active, node, value))
     _field(node,'lineset_id','Line Set ID (1–8)',values)
+    from . import preset_editor,i18n
+    cmds.button(label='Line / Brush presets' if i18n.language()=='en' else '선 형태 / 브러시 프리셋',command=lambda *_:preset_editor.show(node,lambda:_set_changed(ctx)))
     tabs = cmds.tabLayout(innerMarginWidth=6, innerMarginHeight=5)
     ctx['tabs']=tabs
     visible = cmds.columnLayout(adjustableColumn=True)

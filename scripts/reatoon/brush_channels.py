@@ -4,7 +4,7 @@ import numpy as np
 FEATURES=('wireframe','open','outline','crease','material','hard','selected')
 KEYS=('wireframe','open_edges','outline','crease','material_boundaries','hard_edges','selected_edges')
 PRIORITY=('outline','open','intersection','hard','material','selected','crease','wireframe')
-BRUSH_KEYS={'line_color','line_width','brush_size_scale','dash_length','dash_gap','line_opacity','blend_mode','brush_key','width_profile','alpha_profile','profile_direction','profile_split_angle','profile_loop_direction','pencil_profile_width','alpha_depth_reduction','width_depth_reduction','alpha_reduction_origin','width_reduction_origin'}
+BRUSH_KEYS={'line_image','brush_image','brush_stamp_spacing','brush_roughness','brush_density','brush_width_scale','line_pattern','brush_preset','pattern_period','pattern_amplitude','line_color','line_width','brush_size_scale','dash_length','dash_gap','line_opacity','blend_mode','brush_key','width_profile','alpha_profile','profile_direction','profile_split_angle','profile_loop_direction','pencil_profile_width','alpha_depth_reduction','width_depth_reduction','alpha_reduction_origin','width_reduction_origin'}
 FILTER_KEYS=set(KEYS)|{'intersections','self_intersections','crease_angle','crease_angle_max','merge_groups'}
 
 def validate_nested(value,validate,hidden=False):

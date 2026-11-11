@@ -1,0 +1,128 @@
+{
+  "version": "0.8.73",
+  "license": "CC0-1.0",
+  "original_artwork": true,
+  "seed": 198,
+  "examples": [
+    {
+      "file": "Line_Patterns/01_arrow.png",
+      "kind": "line",
+      "label": "화살표",
+      "width": 256,
+      "height": 64,
+      "repeat_px": 72,
+      "height_or_brush_width_px": 18,
+      "sha256": "fa0a79cc3307b3f0fc8e168525d2458cdcbe8d2ac668464c6c356f7f246bd1d8"
+    },
+    {
+      "file": "Line_Patterns/02_wave.png",
+      "kind": "line",
+      "label": "물결",
+      "width": 256,
+      "height": 64,
+      "repeat_px": 64,
+      "height_or_brush_width_px": 16,
+      "sha256": "7fa7db36659e971e3521fdf26554968e09ece35bd6704a19cb06fce9f1125226"
+    },
+    {
+      "file": "Line_Patterns/03_zigzag.png",
+      "kind": "line",
+      "label": "지그재그",
+      "width": 256,
+      "height": 64,
+      "repeat_px": 48,
+      "height_or_brush_width_px": 12,
+      "sha256": "c18effccccb9f1f2be907a9302d039b366ca5645e5c39272e7b5fcf5fc285cb6"
+    },
+    {
+      "file": "Line_Patterns/04_stitches.png",
+      "kind": "line",
+      "label": "바느질",
+      "width": 256,
+      "height": 64,
+      "repeat_px": 64,
+      "height_or_brush_width_px": 16,
+      "sha256": "7d12657996c3366cbeaf30fde0db1386ac73d93694a52102b6bdb39ecff6b726"
+    },
+    {
+      "file": "Line_Patterns/05_loops.png",
+      "kind": "line",
+      "label": "고리",
+      "width": 256,
+      "height": 64,
+      "repeat_px": 64,
+      "height_or_brush_width_px": 16,
+      "sha256": "6dbfae613aa3dfadd228ff7d8600779c72ed9747376025c80720f223de14dc50"
+    },
+    {
+      "file": "Line_Patterns/06_dot_dash.png",
+      "kind": "line",
+      "label": "점과 긴 대시",
+      "width": 256,
+      "height": 64,
+      "repeat_px": 64,
+      "height_or_brush_width_px": 16,
+      "sha256": "8ada5475ee60f9c136942b48511687ea0796000287a350b5f8adab5357c44389"
+    },
+    {
+      "file": "Brush_Strokes/01_ink.png",
+      "kind": "brush",
+      "label": "잉크",
+      "width": 256,
+      "height": 64,
+      "repeat_px": 64,
+      "height_or_brush_width_px": 16,
+      "sha256": "fd220c7118b2dceba3d83a48dbd2d2861d27125f5ca829902b69547c455910f6"
+    },
+    {
+      "file": "Brush_Strokes/02_dry_brush.png",
+      "kind": "brush",
+      "label": "마른 붓",
+      "width": 256,
+      "height": 64,
+      "repeat_px": 64,
+      "height_or_brush_width_px": 16,
+      "sha256": "82a8ea1051825ccfff9e8c909529aea76aef0082f7d918d5e8776a68ab89c432"
+    },
+    {
+      "file": "Brush_Strokes/03_charcoal.png",
+      "kind": "brush",
+      "label": "목탄",
+      "width": 256,
+      "height": 64,
+      "repeat_px": 64,
+      "height_or_brush_width_px": 16,
+      "sha256": "8ec0bde86cb0116bfee94d0bdeeab93ba420ae09eea3816256f3012b9abe63ed"
+    },
+    {
+      "file": "Brush_Strokes/04_soft.png",
+      "kind": "brush",
+      "label": "부드러운 붓",
+      "width": 256,
+      "height": 64,
+      "repeat_px": 64,
+      "height_or_brush_width_px": 16,
+      "sha256": "ff9f9fe9b9e2a1cfcb6022fb5348af883b087ca8cc0176bbba68bf9551b20420"
+    },
+    {
+      "file": "Brush_Strokes/05_bristles.png",
+      "kind": "brush",
+      "label": "붓결",
+      "width": 256,
+      "height": 64,
+      "repeat_px": 64,
+      "height_or_brush_width_px": 16,
+      "sha256": "0f2dd0143618799bf14881ee6fa4013fa66c00874c015effce488f1b448ab9cc"
+    },
+    {
+      "file": "Brush_Strokes/06_worn_ink.png",
+      "kind": "brush",
+      "label": "닳은 잉크",
+      "width": 256,
+      "height": 64,
+      "repeat_px": 64,
+      "height_or_brush_width_px": 16,
+      "sha256": "a84608b5dc4bd658142eeeb94492f3e836a2fe3b5f56e3441336e075e59a4172"
+    }
+  ]
+}

@@ -23,11 +23,14 @@ _fixed_batches=0
 _group_segment_counts={}
 MAX_RETAINED_GROUP_SEGMENTS=262144
 _profile_payload=None
+_fixed_profile_payload=None
+_surface_neighbor_payload=None
 
 
 def _set_style(style_id,width,color):
     _library.rt_style(style_id,width,color)
     style=next((p['styles'][style_id-p['retained_style_offset']] for p in (_passes or []) if p.get('retained_style_offset',-1)<=style_id<p.get('retained_style_offset',-1)+len(p['styles'])),{})
+    _library.rt_style_surface(style_id,bool(style.get('_surface_stroke')))
     curve=style.get('width_depth_reduction',[])
     if curve and not style.get('width_reduction_origin'):
         from .depth_reduction import validate
@@ -41,10 +44,10 @@ def _set_style(style_id,width,color):
     else:alpha=[0.,0.,1.,1.]
     _library.rt_style_alpha_depth(style_id,(c.c_float*4)(*alpha))
     from .brush_profiles import profile_table
-    active=bool(style.get('width_profile') or style.get('alpha_profile'))
+    active=bool(style.get('width_profile') or style.get('alpha_profile') or style.get('line_opacity',1.)!=1.)
     identity=[[0,0,1,0,1,0,1],[0,1,1,1,1,1,1]]
     width_table=profile_table(style.get('width_profile') or identity)
-    alpha_table=profile_table(style.get('alpha_profile') or identity)
+    alpha_table=profile_table(style.get('alpha_profile') or identity).copy();alpha_table[:,1]*=float(style.get('line_opacity',1.))
     count=max(len(width_table),len(alpha_table));values=np.zeros((count,4),np.float32)
     values[:len(width_table),:2]=width_table;values[:len(alpha_table),2:]=alpha_table
     angles=(c.c_double*3)(style.get('profile_direction',-30.),style.get('profile_split_angle',90.),style.get('profile_loop_direction',0))
@@ -68,11 +71,18 @@ def _add_bounded(points,parameters,style_id,width,color):
         if _group_segment_counts.get(style_id,0)+len(p)>MAX_RETAINED_GROUP_SEGMENTS:_begin_pass()
         if not _library.rt_add_retained(p.ctypes.data,q.ctypes.data,len(p),width,color):
             raise retained_geometry.UnsupportedRetained('Retained GPU buffer transfer failed')
+        if _surface_neighbor_payload is not None:
+            neighbors=np.ascontiguousarray(_surface_neighbor_payload[first:first+len(p)],np.float64)
+            _library.rt_surface_neighbors(neighbors.ctypes.data,len(p))
         if _profile_payload is not None:
             vertices,flags=_profile_payload
             ids=np.ascontiguousarray(vertices[first:first+len(p)],np.int64)
             bits=np.ascontiguousarray(flags[first:first+len(p)],np.int64)
+            if _fixed_profile_payload is not None:bits=bits|1024
             _library.rt_profile_metadata(p.ctypes.data,ids.ctypes.data,bits.ctypes.data,len(p))
+            if _fixed_profile_payload is not None:
+                fixed=np.ascontiguousarray(_fixed_profile_payload[first:first+len(p)],np.float32)
+                _library.rt_profile_fixed(fixed.ctypes.data,len(p))
         _group_segment_counts[style_id]=_group_segment_counts.get(style_id,0)+len(p)
 
 def bind(lib):
@@ -84,6 +94,10 @@ def bind(lib):
     lib.rt_add_retained.restype=c.c_int
     lib.rt_begin_pass.argtypes=[];lib.rt_begin_pass.restype=None
     lib.rt_style.argtypes=[c.c_uint,c.c_float,c.POINTER(c.c_float)];lib.rt_style.restype=None
+    lib.rt_style_surface.argtypes=[c.c_uint,c.c_int];lib.rt_style_surface.restype=None
+    lib.rt_surface_neighbors.argtypes=[c.c_void_p,c.c_uint];lib.rt_surface_neighbors.restype=None
+    lib.rt_surface_effect.argtypes=[c.c_char_p,c.c_char_p];lib.rt_surface_effect.restype=None
+    lib.rt_surface_effect(str(Path(__file__).parent/'shaders/surface_lines192.ogsfx').encode('utf8'),str(Path(__file__).parent/'shaders/surface_profiles192.ogsfx').encode('utf8'))
     lib.rt_style_depth.argtypes=[c.c_uint,c.POINTER(c.c_float)];lib.rt_style_depth.restype=None
     lib.rt_style_alpha_depth.argtypes=[c.c_uint,c.POINTER(c.c_float)];lib.rt_style_alpha_depth.restype=None
     lib.rt_mode.argtypes=[c.c_int];lib.rt_mode.restype=None
@@ -95,6 +109,8 @@ def bind(lib):
     lib.rt_add.restype=c.c_int
     lib.rt_style_profiles.argtypes=[c.c_uint,c.c_int,c.c_void_p,c.c_uint,c.c_uint,c.POINTER(c.c_double),c.c_int]
     lib.rt_profile_metadata.argtypes=[c.c_void_p,c.c_void_p,c.c_void_p,c.c_uint]
+    if hasattr(lib,'rt_profile_fixed'):
+        lib.rt_profile_fixed.argtypes=[c.c_void_p,c.c_uint];lib.rt_profile_fixed.restype=None
     lib.rt_profile_effect.argtypes=[c.c_char_p,c.c_wchar_p]
     lib.rt_profile_effect(str(Path(__file__).parent/'shaders/retained_profiles175.ogsfx').encode('utf8'),str(Path(__file__).parents[2]/'plug-ins/2025/reaPencilBrush125.dll'))
     lib.rt_effect(str(Path(__file__).parent/'shaders/retained_lines174.ogsfx').encode('utf-8'))
@@ -136,7 +152,7 @@ def prepare(camera_name,aspect,draw_api=4,destination=''):
         return _fallback(camera_name,aspect,_fallback_reason,destination)
     _switch('retained')
     try:
-        _prepare(camera_name,aspect)
+        _prepare(camera_name,aspect,destination)
         if hasattr(_library,'rt_scope') and vp._gpu_scene is not None:
             from . import view_scope
             vp._last_report['view_scopes']=view_scope.sync(_library,[m['name'] for m in vp._gpu_scene.scene['meshes']],destination)
@@ -168,17 +184,22 @@ def _draw_deferred(camera):
     return total,batches
 
 
-def _prepare(camera_name,aspect):
+def _prepare(camera_name,aspect,destination=""):
     global _key,_passes,_geometry_style_key,_deferred_entries,_deferred_camera_key
     global _fixed_group_count,_fixed_segments,_fixed_batches
+    global _fixed_profile_payload
+    global _surface_neighbor_payload
+    from . import surface_lines
     started=time.perf_counter()
-    key=(vp._generation,vp._gpu_rebuild,vp._gpu_graph_dirty,vp._gpu_style_dirty)
+    key=(vp._generation,vp._gpu_rebuild,vp._gpu_graph_dirty,vp._gpu_style_dirty,surface_lines.preview_revision(),_preset_token(camera_name,aspect,destination))
     if _key==key and not _deferred_entries:
         vp._last_report.update(prepare_ms=(time.perf_counter()-started)*1000,
                                geometry_updated=False,retained_geometry_reused=True)
         return
     path=maya_scene._dag(camera_name);camera=vp._camera_data(path,aspect)
     camera_key=(tuple(camera['position']),tuple(camera['target']),camera['projection'])
+    preset_motion=_key is not None and _key[-1]!=key[-1]
+    preset_camera=_preset_camera(camera,aspect,destination)
     if _key==key:
         if camera_key==_deferred_camera_key:
             vp._last_report.update(prepare_ms=(time.perf_counter()-started)*1000,
@@ -203,6 +224,9 @@ def _prepare(camera_name,aspect):
     if vp._watchers_stale:vp._watch_scene()
     from . import preview_settings
     settings=preview_settings.load()
+    if vp._gpu_graph_dirty:
+        from .surface_lines import nodes
+        if nodes():vp._gpu_rebuild=True
     rebuilt=vp._gpu_scene is None or vp._gpu_rebuild
     if rebuilt:
         geometry_cache=(vp._gpu_scene.smooth_rebuild_cache() if vp._smooth_rebuild_only and vp._gpu_scene is not None and not vp._gpu_scene.empty else None)
@@ -214,6 +238,9 @@ def _prepare(camera_name,aspect):
     live=vp._gpu_scene
     changed=False
     if not live.empty and live.generation!=vp._generation:
+        for mesh in live.scene['meshes']:
+            mesh['_surface_strokes']=[v for v in mesh.get('_surface_strokes',[]) if not v.get('_drawing_feedback')]
+            mesh.pop('_drawing_revision',None)
         changed=live.update();live.generation=vp._generation
     graph_dirty=vp._gpu_graph_dirty
     if graph_dirty:
@@ -222,21 +249,36 @@ def _prepare(camera_name,aspect):
         # Retain face target arrays on a brush-only edit.
         table={target['node']:target['settings'] for line in line_graph.snapshot() for target in line['sets']}
         live.scene['line_sets']=table
+        if any(m.get('_surface_strokes') for m in live.scene['meshes']) or any(v.get('line_pattern') or v.get('brush_preset') for v in table.values()) or any(s.get('_preset_child') for p in (_passes or []) for s in p['styles']):_passes=None
         if _passes is not None:
             for item in _passes:
                 base=dict(renderer.DEFAULTS,**settings)
                 item['styles']=[dict(dict(base,**table.get(n,{})),**{k:v for k,v in old.items() if k.startswith('_')}) for old,n in zip(item['styles'],item['style_nodes'])]
         vp._gpu_style_dirty=False
+    drawing_dirty=surface_lines.sync_preview(live.scene)
+    if drawing_dirty:
+        previous_passes=_passes;_passes=None
+    else:previous_passes=None
     if _passes is None:
         _passes=renderer.line_style_passes(live.scene,settings)
         for item in _passes:
             nodes=line_graph.list_sets(item['line']) if item['line'] else []
-            item['style_nodes']=[nodes[int(s['_order'])] for s in item['styles']] if nodes else []
+            if 'style_nodes' not in item:item['style_nodes']=[nodes[int(s['_order'])] for s in item['styles']] if nodes else []
+    if previous_passes is not None:
+        for item,old in zip(_passes,previous_passes):
+            if item['line']==old['line'] and item['style_nodes']==old['style_nodes']:
+                for name in ('edge_cache','edge_ranges','deferred_cache'):
+                    if name in old:item[name]=old[name]
+    for preset_pass in _passes:
+        for preset_style in preset_pass['styles']:
+            if preset_style.get('_png_band') and not preset_style.get('_png_preview_scaled'):
+                preset_style['line_width']*=2.;preset_style['_png_preview_scaled']=True
     preview_settings.filter_passes(_passes)
+    preset_camera=_preset_camera(camera,aspect,destination)
     if live.scene.get('merge_groups'):raise retained_geometry.UnsupportedRetained('Merge Groups use the legacy GPU viewport')
     if any(s.get(k) for item in _passes for s in item['styles'] for k in ('hidden_lines','dash_length','distance_reduction')):
         raise retained_geometry.UnsupportedRetained('Advanced brush styles use the legacy GPU viewport')
-    geometry_style_key=json.dumps([[dict({k:v for k,v in style.items() if k not in ('line_color','line_width','width_depth_reduction','alpha_depth_reduction','width_profile','alpha_profile')},_preview_profile=bool(style.get('width_profile') or style.get('alpha_profile'))) for style in p['styles']] for p in _passes],sort_keys=True)
+    geometry_style_key=json.dumps([[dict({k:v for k,v in style.items() if k not in ('line_color','line_width','width_depth_reduction','alpha_depth_reduction','width_profile','alpha_profile')},_preview_profile=bool(style.get('width_profile') or style.get('alpha_profile') or style.get('line_opacity',1.)!=1.)) for style in p['styles']] for p in _passes],sort_keys=True)
     style_offset=0
     for item in _passes:
         item['retained_style_offset']=style_offset
@@ -244,21 +286,25 @@ def _prepare(camera_name,aspect):
             color=(c.c_float*3)(*style.get('line_color',[.04,.04,.07]))
             _set_style(style_offset+i,float(style.get('line_width',1.5)),color)
         style_offset+=len(item['styles'])
-    if not rebuilt and not changed and not graph_dirty and geometry_style_key==_geometry_style_key:
+    if not preset_motion and not drawing_dirty and not rebuilt and not changed and not graph_dirty and geometry_style_key==_geometry_style_key:
         styles_by_offset={p['retained_style_offset']:p['styles'] for p in _passes}
         _deferred_entries=[(d,styles_by_offset[o],o,i) for d,_,o,i in _deferred_entries]
-        _key=(vp._generation,vp._gpu_rebuild,vp._gpu_graph_dirty,vp._gpu_style_dirty)
+        _key=(vp._generation,vp._gpu_rebuild,vp._gpu_graph_dirty,vp._gpu_style_dirty,surface_lines.preview_revision(),_preset_token(camera_name,aspect,destination))
         vp._last_report.update(geometry_generation=vp._generation,geometry_updated=False,retained_geometry_reused=True,
                               prepare_ms=(time.perf_counter()-started)*1000)
         return
     partial=hasattr(_library,'rt_reuse') and len(live.scene['meshes'])<=256
-    dirty=set(getattr(live,'changed_meshes',[]))
-    reuse=partial and changed and not rebuilt and not graph_dirty and geometry_style_key==_geometry_style_key
+    dirty=set(getattr(live,'changed_meshes',[]))|drawing_dirty
+    # Style refresh can replace pass dictionaries while retaining the same
+    # geometry signature. Those fresh passes have no native range/cache map.
+    reuse=(partial and (changed or bool(drawing_dirty)) and not rebuilt and not graph_dirty and not preset_motion and geometry_style_key==_geometry_style_key
+           and all(all(k in p for k in ('edge_cache','edge_ranges','deferred_cache')) for p in _passes if p['styles']))
     _library.rt_begin();total=0;edge_total=0;cross_total=0;batch_count=0;pass_reports=[]
     _deferred_entries=[]
     def submit(points,parameters,styles,owners,vertices=None,flags=None,outline_eligible=None):
-        global _profile_payload
+        global _profile_payload,_surface_neighbor_payload,_fixed_profile_payload
         nonlocal total,batch_count
+        points,parameters,owners,vertices,flags,outline_eligible,preset_u=_expand_presets(points,parameters,owners,styles,preset_camera,vertices,flags,outline_eligible)
         unique=np.unique(owners)
         for owner in unique:
             style=styles[int(owner)]
@@ -267,7 +313,7 @@ def _prepare(camera_name,aspect):
             q=np.ascontiguousarray(parameters if len(unique)==1 else parameters[selected],np.float32)
             color=(c.c_float*3)(*style.get('line_color',[.04,.04,.07]))
             _set_style(item['retained_style_offset']+int(owner),float(style.get('line_width',1.5)),color)
-            active=bool(style.get('width_profile') or style.get('alpha_profile'))
+            active=bool(style.get('width_profile') or style.get('alpha_profile') or style.get('line_opacity',1.)!=1.)
             if active:
                 # A single incident face is an open edge, not a silhouette.
                 # Repeat its plane in this profiled batch so both GPU facing
@@ -283,8 +329,12 @@ def _prepare(camera_name,aspect):
                 independent,ids=independent_edges(ids,bits,bool(style.get('outline',False)),trace_vertices=True)
                 bits[independent]|=512
                 _profile_payload=(ids,bits)
+            old_neighbors,old_fixed=_surface_neighbor_payload,_fixed_profile_payload
+            if preset_u is not None:
+                _surface_neighbor_payload=None
+                _fixed_profile_payload=np.ascontiguousarray(preset_u if len(unique)==1 else preset_u[selected],np.float64) if active else None
             try:_add_bounded(p,q,item['retained_style_offset']+int(owner),float(style.get('line_width',1.5)),color)
-            finally:_profile_payload=None
+            finally:_profile_payload=None;_surface_neighbor_payload=old_neighbors;_fixed_profile_payload=old_fixed
             total+=len(p);batch_count+=1
     if not live.empty:
         for item in _passes:
@@ -301,7 +351,9 @@ def _prepare(camera_name,aspect):
             for i,mesh in enumerate(live.scene['meshes']):
                 faces=item['face_style_ids'][i];selected=item.get('selected_edges')
                 selected=None if selected is None else selected[i]
-                if not np.any(faces>=0) and not selected:continue
+                from .surface_strokes import for_pass
+                strokes=for_pass(mesh,item)
+                if not np.any(faces>=0) and not selected and not strokes:continue
                 if partial:
                     _begin_pass();first=_library.rt_group_count()
                     if reuse and i not in dirty and i in item['edge_ranges']:
@@ -310,6 +362,19 @@ def _prepare(camera_name,aspect):
                         if i in item['deferred_cache']:
                             _deferred_entries.append((item['deferred_cache'][i],styles,item['retained_style_offset'],i))
                         continue
+                stroke_offset=len(mesh['vertices'])
+                for stroke,owner in strokes:
+                    from .surface_strokes import neighbor_points,preview_samples
+                    keep=preview_samples(stroke['points']);pairs=np.column_stack((keep[:-1],keep[1:]))
+                    points=stroke['points'][pairs];parameters=np.zeros((len(pairs),2,4),np.float32)
+                    parameters[:,:,:3]=stroke['normals'][pairs];parameters[:,:,3]=2*(i+1)
+                    _surface_neighbor_payload=neighbor_points(stroke['points'][keep])
+                    if '_input_u' in stroke:
+                        if not hasattr(_library,'rt_profile_fixed'):raise retained_geometry.UnsupportedRetained('Surface pressure requires the updated general Preview module')
+                        _fixed_profile_payload=stroke['_input_u'][pairs]
+                    try:submit(points,parameters,styles,np.full(len(pairs),owner,np.int32),pairs+stroke_offset,np.full(len(pairs),64,np.int64),np.zeros(len(pairs),bool))
+                    finally:_fixed_profile_payload=None;_surface_neighbor_payload=None
+                    stroke_offset+=len(stroke['points']);edge_total+=len(pairs)
                 cache=item['edge_cache'].setdefault(i,{}) if partial else None
                 if cache is not None:cache['evaluate']=_evaluate_edges
                 try:data=retained_geometry.candidates(mesh,faces,styles,selected,cache=cache,
@@ -322,7 +387,7 @@ def _prepare(camera_name,aspect):
                     parameters[:,0,:3]=data['normal0'];parameters[:,1,:3]=data['normal1']
                 parameters[:,0,3]=2*(i+1)+data['dynamic'];parameters[:,1,3]=2*(i+1)
                 vertex_ids=None
-                if any(s.get('width_profile') or s.get('alpha_profile') for s in styles):
+                if any(s.get('width_profile') or s.get('alpha_profile') or s.get('line_opacity',1.)!=1. for s in styles):
                     from .gpu_topology import prepare as topology
                     top=topology(mesh);vertex_ids=np.concatenate((top['pairs'],top['diagonal_pairs']))[data['edge_ids']]
                 submit(data['points'],parameters,styles,data['owners'],vertex_ids,data['static_flags'],data['outline_eligible']);edge_total+=len(data['owners'])
@@ -342,7 +407,7 @@ def _prepare(camera_name,aspect):
     _deferred_camera_key=camera_key
     native_groups=_library.rt_group_count();_library.rt_end()
     _geometry_style_key=geometry_style_key
-    _key=(vp._generation,vp._gpu_rebuild,vp._gpu_graph_dirty,vp._gpu_style_dirty)
+    _key=(vp._generation,vp._gpu_rebuild,vp._gpu_graph_dirty,vp._gpu_style_dirty,surface_lines.preview_revision(),_preset_token(camera_name,aspect,destination))
     vp._last_report=dict(state='ready',backend='retained_gpu',segments=total,submitted_segments=total,
         edge_candidates=edge_total,intersection_segments=cross_total,batches=batch_count,
         mesh_count=len(live.scene['meshes']),triangles=sum(len(m['triangles']) for m in live.scene['meshes']),
@@ -354,3 +419,44 @@ def _prepare(camera_name,aspect):
     vp._last_report.update(exceptional_edges=sum(len(d['owners']) for d,_,_,_ in _deferred_entries),
                            exceptional_visible_segments=deferred_count,retained_draw_groups=native_groups,
                            retained_group_segment_limit=MAX_RETAINED_GROUP_SEGMENTS)
+
+
+def _preset_view(destination):
+    from maya.api import OpenMayaUI
+    try:return OpenMayaUI.M3dView.getM3dViewFromModelPanel(destination)
+    except RuntimeError:return OpenMayaUI.M3dView.active3dView()
+
+def _preset_token(camera_name,aspect,destination):
+    from .stroke_presets import active
+    if not any(active(s) for item in (_passes or []) for s in item['styles']):return None
+    view=_preset_view(destination);path=maya_scene._dag(camera_name)
+    return (json.dumps(vp._camera_data(path,aspect),sort_keys=True),view.portWidth(),view.portHeight())
+
+def _preset_camera(camera,aspect,destination):
+    from .stroke_presets import active
+    if not any(active(s) for item in (_passes or []) for s in item['styles']):return None
+    view=_preset_view(destination)
+    return renderer._camera(camera,max(1,view.portWidth()),max(1,view.portHeight()))
+
+def _expand_presets(points,parameters,owners,styles,camera,vertices,flags,outline):
+    from .stroke_presets import active,expand,domains,variant_owner
+    if camera is None or not any(active(styles[int(i)]) for i in np.unique(owners)):
+        return points,parameters,owners,vertices,flags,outline,None
+    spans={}
+    for owner in np.unique(owners):
+        ids=np.flatnonzero(owners==owner)
+        if active(styles[int(owner)]):spans.update(zip(ids,domains(points[ids],camera)))
+    out=[];params=[];new_owners=[];bits=[];eligible=[];output_domains=[]
+    for i,(ends,owner) in enumerate(zip(points,owners)):
+        style=styles[int(owner)];chunks=expand(ends,style,camera,phase=spans[i]) if active(style) else [(ends[None],np.array([[0.,1.]]),False)]
+        for pairs,t,thin in chunks:
+            n=len(pairs);out.append(pairs);params.append(np.repeat(parameters[i:i+1],n,axis=0));new_owners.extend([variant_owner(style,int(owner),thin)]*n)
+            bits.extend([int(flags[i]) if flags is not None else 0]*n);eligible.extend([bool(outline[i]) if outline is not None else False]*n)
+            uv=t
+            if _fixed_profile_payload is not None:
+                a,b=_fixed_profile_payload[i];uv=a+t*(b-a)
+            output_domains.append(uv)
+    if not out:
+        return np.empty((0,2,3)),np.empty((0,2,4),np.float32),np.empty(0,np.int32),np.empty((0,2),np.int64),np.empty(0,np.int64),np.empty(0,bool),np.empty((0,2))
+    count=len(new_owners)
+    return np.concatenate(out),np.concatenate(params),np.asarray(new_owners,np.int32),np.arange(count*2,dtype=np.int64).reshape(-1,2),np.asarray(bits,np.int64),np.asarray(eligible,bool),np.concatenate(output_domains)
