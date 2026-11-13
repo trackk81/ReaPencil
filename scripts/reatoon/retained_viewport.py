@@ -27,10 +27,32 @@ _fixed_profile_payload=None
 _surface_neighbor_payload=None
 
 
+def _gpu_brush(style):
+    return (hasattr(_library, 'rt_style_brush') and not style.get('line_pattern')
+            and style.get('brush_preset', 0) in (1, 2, 3, 4)
+            and not any(style.get(k) for k in ('width_profile', 'alpha_profile', '_surface_stroke'))
+            and (style['brush_preset'] != 4 or bool(style.get('brush_image'))))
+
+
+def _preview_preset_active(style):
+    from .stroke_presets import active
+    return active(style) and not _gpu_brush(style)
+
+
 def _set_style(style_id,width,color):
     _library.rt_style(style_id,width,color)
     style=next((p['styles'][style_id-p['retained_style_offset']] for p in (_passes or []) if p.get('retained_style_offset',-1)<=style_id<p.get('retained_style_offset',-1)+len(p['styles'])),{})
     _library.rt_style_surface(style_id,bool(style.get('_surface_stroke')))
+    gpu_brush = _gpu_brush(style)
+    if hasattr(_library, 'rt_style_brush'):
+        from .png_pattern import mask
+        image = mask(style['brush_image']) if gpu_brush and style['brush_preset'] == 4 else None
+        params = (c.c_float*4)(style['brush_preset'] if gpu_brush else 0,
+                              style.get('brush_roughness', 1.), style.get('brush_density', 1.),
+                              style.get('brush_stamp_spacing', 24.))
+        _library.rt_style_brush(style_id, params, style.get('brush_width_scale', 1.),
+                                style.get('line_opacity', 1.), None if image is None else image.ctypes.data,
+                                0 if image is None else image.shape[1], 0 if image is None else image.shape[0])
     curve=style.get('width_depth_reduction',[])
     if curve and not style.get('width_reduction_origin'):
         from .depth_reduction import validate
@@ -44,7 +66,7 @@ def _set_style(style_id,width,color):
     else:alpha=[0.,0.,1.,1.]
     _library.rt_style_alpha_depth(style_id,(c.c_float*4)(*alpha))
     from .brush_profiles import profile_table
-    active=bool(style.get('width_profile') or style.get('alpha_profile') or style.get('line_opacity',1.)!=1.)
+    active=not _gpu_brush(style) and bool(style.get('width_profile') or style.get('alpha_profile') or style.get('line_opacity',1.)!=1.)
     identity=[[0,0,1,0,1,0,1],[0,1,1,1,1,1,1]]
     width_table=profile_table(style.get('width_profile') or identity)
     alpha_table=profile_table(style.get('alpha_profile') or identity).copy();alpha_table[:,1]*=float(style.get('line_opacity',1.))
@@ -115,6 +137,12 @@ def bind(lib):
         lib.rt_profile_fixed.argtypes=[c.c_void_p,c.c_uint];lib.rt_profile_fixed.restype=None
     lib.rt_profile_effect.argtypes=[c.c_char_p,c.c_wchar_p]
     lib.rt_profile_effect(str(Path(__file__).parent/'shaders/retained_profiles175.ogsfx').encode('utf8'),str(Path(__file__).parents[2]/'plug-ins/2025/reaPencilBrush125.dll'))
+    if hasattr(lib, 'rt_style_brush'):
+        lib.rt_style_brush.argtypes=[c.c_uint,c.POINTER(c.c_float),c.c_float,c.c_float,c.c_void_p,c.c_uint,c.c_uint]
+        lib.rt_style_brush.restype=None
+        lib.rt_brush_effect.argtypes=[c.c_char_p]
+        lib.rt_brush_effect.restype=None
+        lib.rt_brush_effect(str(Path(__file__).parent/'shaders/retained_brush206.ogsfx').encode('utf-8'))
     lib.rt_effect(str(Path(__file__).parent/'shaders/retained_lines174.ogsfx').encode('utf-8'))
     if hasattr(lib,'rt_scope'):
         lib.rt_scope.argtypes=[c.c_char_p,c.c_void_p,c.c_uint];lib.rt_scope.restype=None
@@ -197,7 +225,9 @@ def _prepare(camera_name,aspect,destination=""):
     started=time.perf_counter()
     key=(vp._generation,vp._gpu_rebuild,vp._gpu_graph_dirty,vp._gpu_style_dirty,surface_lines.preview_revision(),_preset_token(camera_name,aspect,destination))
     navigation.observe(key)
-    if _key==key:navigation.at_exact(key)
+    if _key==key:
+        navigation.at_exact(key)
+        vp._last_report['brush_detail_state']='exact'
     if _key==key and not _deferred_entries:
         vp._last_report.update(prepare_ms=(time.perf_counter()-started)*1000,
                                geometry_updated=False,retained_geometry_reused=True)
@@ -206,13 +236,14 @@ def _prepare(camera_name,aspect,destination=""):
     camera_key=(tuple(camera['position']),tuple(camera['target']),camera['projection'])
     preset_motion=_key is not None and _key[-1]!=key[-1]
     preset_camera=_preset_camera(camera,aspect,destination)
-    if _key is not None and key!=_key and key[:-1]==_key[:-1] and not _deferred_entries and navigation.reuse(key,_passes,preset_camera,destination):
+    navigating=(_key is not None and key!=_key and key[:-1]==_key[:-1]
+                and navigation.reuse(key,_passes,preset_camera,destination))
+    if navigating:
         vp._last_report.update(prepare_ms=(time.perf_counter()-started)*1000,geometry_updated=False,
                                retained_geometry_reused=True,brush_detail_state='navigation_cached',
                                brush_navigation_statistics=dict(navigation.stats))
-        return
-    if _key==key:
-        if camera_key==_deferred_camera_key:
+    if navigating or _key==key:
+        if not _deferred_entries or camera_key==_deferred_camera_key:
             vp._last_report.update(prepare_ms=(time.perf_counter()-started)*1000,
                                    geometry_updated=False,retained_geometry_reused=True)
             return
@@ -324,6 +355,12 @@ def _prepare(camera_name,aspect,destination=""):
     # geometry signature. Those fresh passes have no native range/cache map.
     reuse=(partial and (changed or bool(drawing_dirty)) and not rebuilt and not graph_dirty and not preset_motion and geometry_style_key==_geometry_style_key
            and all(all(k in p for k in ('edge_cache','edge_ranges','deferred_cache')) for p in _passes if p['styles']))
+    # A camera-only worker result uses the same immutable inputs and pass order.
+    # Surface strokes also carry transient neighbor data and use normal replay.
+    cached_passes = (_passes if preset_motion and not (rebuilt or changed or graph_dirty or drawing_dirty)
+                     and key[:-1] == _key[:-1] and navigation.ready_for(key)
+                     and not any(m.get('_surface_strokes') for m in live.scene['meshes']) else None)
+    previous_deferred = _deferred_entries
     navigation.begin(key,_passes)
     _library.rt_begin();total=0;edge_total=0;cross_total=0;batch_count=0;pass_reports=[]
     _deferred_entries=[]
@@ -339,7 +376,7 @@ def _prepare(camera_name,aspect,destination=""):
             q=np.ascontiguousarray(parameters if len(unique)==1 else parameters[selected],np.float32)
             color=(c.c_float*3)(*style.get('line_color',[.04,.04,.07]))
             _set_style(item['retained_style_offset']+int(owner),float(style.get('line_width',1.5)),color)
-            active=bool(style.get('width_profile') or style.get('alpha_profile') or style.get('line_opacity',1.)!=1.)
+            active=not _gpu_brush(style) and bool(style.get('width_profile') or style.get('alpha_profile') or style.get('line_opacity',1.)!=1.)
             if active:
                 # A single incident face is an open edge, not a silhouette.
                 # Repeat its plane in this profiled batch so both GPU facing
@@ -371,6 +408,23 @@ def _prepare(camera_name,aspect,destination=""):
             if not styles:continue
             pass_first=_library.rt_group_count()
             deferred_first=len(_deferred_entries)
+            if cached_passes is not None and 'brush_request_range' in item:
+                first_request, last_request, cross_count, edge_count, report = item['brush_request_range']
+                for request in navigation.requests(first_request,last_request):
+                    submit(request['points'],request['parameters'],styles,request['owners'],
+                           request['vertices'],request['flags'],request['outline'])
+                cross_total+=cross_count;edge_total+=edge_count;pass_reports.append(report)
+                offset=item['retained_style_offset']
+                _fixed_pass_ranges.append((pass_first,_library.rt_group_count()-pass_first,offset))
+                entries=[(data,styles,offset,mesh_id) for data,_,old_offset,mesh_id in previous_deferred if old_offset==offset]
+                _deferred_entries.extend(entries)
+                if entries:
+                    added,draws=_draw_deferred(camera,entries)
+                    deferred_count+=added;deferred_batches+=draws
+                item['edge_ranges'].clear()
+                continue
+            first_request=navigation.request_count()
+            first_edge=edge_total
             gpu=live.gpu;gpu.configure_face_styles(item['face_style_ids'],len(styles),item.get('selected_edges'))
             gpu.set_camera(camera) # No viewport_clip: retain ALL pages and future views.
             cross,owners,report=gpu.intersections(styles,settings.get('intersection_tolerance',1e-7))
@@ -426,6 +480,7 @@ def _prepare(camera_name,aspect,destination=""):
                     item['deferred_cache'][i]=data['deferred']
                     _deferred_entries.append((data['deferred'],styles,item['retained_style_offset'],i))
                 if partial:item['edge_ranges'][i]=(first,_library.rt_group_count()-first,len(data['owners']))
+            item['brush_request_range']=(first_request,navigation.request_count(),len(owners),edge_total-first_edge,report)
             offset=item['retained_style_offset']
             _fixed_pass_ranges.append((pass_first,_library.rt_group_count()-pass_first,offset))
             if len(_deferred_entries)>deferred_first:
@@ -437,7 +492,7 @@ def _prepare(camera_name,aspect,destination=""):
     native_groups=_library.rt_group_count();_library.rt_end()
     _geometry_style_key=geometry_style_key
     _key=(vp._generation,vp._gpu_rebuild,vp._gpu_graph_dirty,vp._gpu_style_dirty,surface_lines.preview_revision(),_preset_token(camera_name,aspect,destination))
-    navigation.end(_key)
+    navigation.end(_key,complete=not reuse)
     vp._last_report=dict(state='ready',backend='retained_gpu',segments=total,submitted_segments=total,
         edge_candidates=edge_total,intersection_segments=cross_total,batches=batch_count,
         mesh_count=len(live.scene['meshes']),triangles=sum(len(m['triangles']) for m in live.scene['meshes']),
@@ -458,24 +513,24 @@ def _preset_view(destination):
     except RuntimeError:return OpenMayaUI.M3dView.active3dView()
 
 def _preset_token(camera_name,aspect,destination):
-    from .stroke_presets import active
-    if not any(active(s) for item in (_passes or []) for s in item['styles']):return None
+    if not any(_preview_preset_active(s) for item in (_passes or []) for s in item['styles']):return None
     view=_preset_view(destination);path=maya_scene._dag(camera_name)
     return (json.dumps(vp._camera_data(path,aspect),sort_keys=True),view.portWidth(),view.portHeight())
 
 def _preset_camera(camera,aspect,destination):
-    from .stroke_presets import active
-    if not any(active(s) for item in (_passes or []) for s in item['styles']):return None
+    if not any(_preview_preset_active(s) for item in (_passes or []) for s in item['styles']):return None
     view=_preset_view(destination)
     return renderer._camera(camera,max(1,view.portWidth()),max(1,view.portHeight()))
 
 def _expand_presets(points,parameters,owners,styles,camera,vertices,flags,outline):
-    from .stroke_presets import active,expand,domains,variant_owner
+    from .stroke_presets import expand,domains,variant_owner
+    active=_preview_preset_active
     if camera is None or not any(active(styles[int(i)]) for i in np.unique(owners)):
         return points,parameters,owners,vertices,flags,outline,None
     if any(styles[int(i)].get('line_pattern')!=7 and (int(styles[int(i)].get('brush_preset',0)) in (1,2,3) or styles[int(i)].get('line_pattern')==1 and not styles[int(i)].get('brush_preset')) for i in np.unique(owners)):
         from .preview_brush_batch import retained as batch
-        return batch(points,parameters,owners,styles,camera,flags,outline,_fixed_profile_payload)
+        expansion_styles=[dict(s, brush_preset=0) if _gpu_brush(s) else s for s in styles]
+        return batch(points,parameters,owners,expansion_styles,camera,flags,outline,_fixed_profile_payload)
     spans={}
     for owner in np.unique(owners):
         ids=np.flatnonzero(owners==owner)

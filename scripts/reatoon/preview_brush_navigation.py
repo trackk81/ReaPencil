@@ -70,6 +70,18 @@ def _frozen(a):
     b=np.array(a,copy=True);b.setflags(write=False);return b
 
 
+def ready_for(key):
+    return _ready is not None and _ready[:2] == (key[:-1], key[-1])
+
+
+def request_count():
+    return len(_building) if _building is not None else 0
+
+
+def requests(first, last):
+    return _requests[first:last]
+
+
 def begin(key,passes):
     global _building,_apply,_apply_index,_ready,_revision
     _revision+=1;_apply_index=0;_building=[] if eligible(passes) else None
@@ -80,6 +92,11 @@ def begin(key,passes):
 def expansion(oracle,args,fixed):
     global _apply_index,_apply
     points,parameters,owners,styles,camera,vertices,flags,outline=args
+    previous = _apply[_apply_index][0] if _apply is not None and _apply_index < len(_apply) else None
+    if previous is not None and previous['points'] is points and previous['styles'] == styles:
+        _apply_index += 1
+        _building.append(previous)
+        return _apply[_apply_index - 1][1]
     request=dict(points=_frozen(points),parameters=_frozen(parameters),owners=_frozen(owners),styles=copy.deepcopy(styles),vertices=_frozen(vertices),flags=_frozen(flags),outline=_frozen(outline),fixed=_frozen(fixed)) if _building is not None else None
     if request is not None:_building.append(request)
     if _apply is not None:
@@ -97,10 +114,10 @@ def expansion(oracle,args,fixed):
     return oracle(*args)
 
 
-def end(key):
+def end(key,complete=True):
     global _source,_requests,_building,_apply,_latest,_cache_seed
     if _apply is not None:stats['applied']+=1
-    _source=key[:-1] if _building else None;_requests=_building or [];_building=None;_apply=None;_latest=None
+    _source=key[:-1] if _building and complete else None;_requests=(_building or []) if complete else [];_building=None;_apply=None;_latest=None
     if _source is not None:
         from . import preview_brush_batch
         _cache_seed=(_source,preview_brush_batch.connectivity_seed())

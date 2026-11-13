@@ -1,4 +1,5 @@
 """Batch the existing procedural brush arithmetic without reducing samples."""
+import hashlib
 import numpy as np
 from collections import OrderedDict,deque
 
@@ -20,34 +21,48 @@ def domains(points,camera):
     """Cache only world connectivity; evaluate projected lengths every frame."""
     from .renderer import _project
     global _topology_bytes
-    points=np.asarray(points,float);rounded=np.round(points,10);key=rounded.tobytes()
+    points = np.ascontiguousarray(points, dtype=np.float64)
+    key = hashlib.sha256(memoryview(points)).digest()
     chains=_topology.get(key)
     if chains is None:
-        adjacency={};keys=[]
-        for i,pair in enumerate(rounded.tolist()):
-            ends=tuple(tuple(p) for p in pair);keys.append(ends)
-            for v in ends:adjacency.setdefault(v,[]).append(i)
-        used=set();chains=[]
-        for i in range(len(points)):
-            if i in used:continue
-            chain=deque([(i,0,1)]);used.add(i)
-            for side in (0,1):
-                current=i;end=side
+        rounded = np.round(points, 10)
+        _, endpoint_ids, counts = np.unique(rounded.reshape(-1, 3), axis=0,
+                                            return_inverse=True, return_counts=True)
+        eligible = np.flatnonzero(counts[endpoint_ids] == 2)
+        ordered = eligible[np.argsort(endpoint_ids[eligible], kind='stable')]
+        neighbors = np.full(2 * len(points), -1, dtype=np.int64)
+        neighbors[ordered] = ordered.reshape(-1, 2)[:, ::-1].ravel()
+        links = neighbors.reshape(-1, 2)
+        used = np.zeros(len(points), dtype=bool)
+        chains = []
+        for i in np.flatnonzero(np.any(links >= 0, axis=1)):
+            if used[i]:
+                continue
+            chain = deque([(i, 0, 1)])
+            used[i] = True
+            for side in (0, 1):
+                current, end = i, side
                 while True:
-                    edges=adjacency[keys[current][end]]
-                    if len(edges)!=2:break
-                    other=edges[0] if edges[1]==current else edges[1]
-                    if other in used:break
-                    near=0 if keys[other][0]==keys[current][end] else 1;far=1-near;used.add(other)
-                    if side==0:chain.appendleft((other,far,near))
-                    else:chain.append((other,near,far))
-                    current,end=other,far
-            if len(chain)>1:chains.append(tuple(chain))
+                    endpoint = links[current, end]
+                    if endpoint < 0:
+                        break
+                    other, near = divmod(int(endpoint), 2)
+                    if used[other]:
+                        break
+                    far = 1 - near
+                    used[other] = True
+                    if side == 0:
+                        chain.appendleft((other, far, near))
+                    else:
+                        chain.append((other, near, far))
+                    current, end = other, far
+            if len(chain) > 1:
+                chains.append(tuple(chain))
         # Bound retained topology, including Python tuple overhead conservatively.
         cost=len(key)+sum(len(c)*160 for c in chains)
-        while _topology and (_topology_bytes+cost>32*1024**2 or len(_topology)>=256):
+        while _topology and (_topology_bytes+cost>64*1024**2 or len(_topology)>=1024):
             _,(_,oldcost)=_topology.popitem(last=False);_topology_bytes-=oldcost
-        if cost<=32*1024**2:_topology[key]=(chains,cost);_topology_bytes+=cost
+        if cost<=64*1024**2:_topology[key]=(chains,cost);_topology_bytes+=cost
     else:
         _topology.move_to_end(key);chains=chains[0]
     cam=(points-camera['eye'])@camera['basis'].T
@@ -62,6 +77,32 @@ def domains(points,camera):
     return result
 
 
+def _visible_brush_candidates(points, parameters, style, camera):
+    """Keep edges that can pass the shader's two-face silhouette test."""
+    dynamic = parameters[:, 0, 3].astype(np.int64) & 1
+    keep = np.ones(len(points), dtype=bool)
+    ids = np.flatnonzero(dynamic)
+    if not len(ids):
+        return keep
+    ends = points[ids]
+    normals = parameters[ids, :, :3]
+    sight = camera['eye'] - ends
+    if camera['ortho']:
+        sight = np.broadcast_to(-camera['basis'][2], ends.shape)
+        margin = np.full(len(ids), 1e-5)
+    else:
+        depth = np.max(np.abs(sight @ camera['basis'][2]), axis=1)
+        width = abs(style['line_width'] * style.get('brush_width_scale', 1.))
+        displacement = width * (1. + abs(style.get('brush_roughness', 1.)))
+        margin = depth * displacement / camera['focal']
+        margin += np.max(np.linalg.norm(sight, axis=2), axis=1) * 1e-5
+    facing = sight @ normals.transpose(0, 2, 1)
+    bound = margin[:, None, None] * np.linalg.norm(normals, axis=2)[:, None, :]
+    same_side = np.all(facing > bound, axis=(1, 2)) | np.all(facing < -bound, axis=(1, 2))
+    keep[ids] = ~same_side
+    return keep
+
+
 def retained(points,parameters,owners,styles,camera,flags,outline,fixed=None):
     from .stroke_presets import active,expand as scalar,variant_owner
     output=[];params=[];own=[];bits=[];eligible=[];uvs=[];order=[]
@@ -72,7 +113,9 @@ def retained(points,parameters,owners,styles,camera,flags,outline,fixed=None):
         native=None
         if style.get('line_pattern',0)==0 and int(style.get('brush_preset',0)) in (1,2,3):
             from .preview_brush_native import expand as native_expand
-            native=native_expand(points[ids],style,camera,spans)
+            keep=_visible_brush_candidates(points[ids],parameters[ids],style,camera)
+            native=native_expand(points[ids[keep]],style,camera,spans[keep])
+            if native is not None:ids=ids[keep]
         if native is not None:
             p,t,source,thin=native
             if len(source):chunks.append((p,t,ids[source],np.where(thin,variant_owner(style,int(owner),True) if style.get("brush_preset") else int(owner),int(owner))))
