@@ -29,11 +29,16 @@ def png_rows(path,width,height,channels,rows):
                 output.write(data);crc=zlib.crc32(data,crc)
             output.write(struct.pack('>I',crc&0xffffffff));output.write(chunk(b'IEND',b''))
 
-def scaled_png(path,image,scale,down,transform=None):
+def scaled_png(path,image,scale,down,transform=None,post_filter=None):
     h,w,c=image.shape;out_h=h//scale;out_w=w//scale
     def rows():
         for y in range(0,out_h,16):
-            values=down(image[y*scale:min(y+16,out_h)*scale],scale,_full_size=image.size)
+            end=min(y+16,out_h)
+            first=max(0,y-1) if post_filter else y
+            last=min(end+1,out_h) if post_filter else end
+            values=down(image[first*scale:last*scale],scale,_full_size=image.size)
+            if post_filter:
+                values=post_filter(values)[y-first:end-first]
             yield transform(values) if transform is not None else values
     png_rows(path,out_w,out_h,c,rows())
 

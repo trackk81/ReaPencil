@@ -764,6 +764,21 @@ def _down(image, scale, _full_size=None):
     return image.reshape(h // scale, scale, w // scale, scale, c).mean(axis=(1, 3))
 
 
+def _filter_line_samples(image):
+    """Suppress pixel-phase contrast in narrow strokes with a separable tent."""
+    horizontal = image * .625
+    horizontal[:, 1:] += image[:, :-1] * .1875
+    horizontal[:, :-1] += image[:, 1:] * .1875
+    horizontal[:, 0] += image[:, 0] * .1875
+    horizontal[:, -1] += image[:, -1] * .1875
+    filtered = horizontal * .625
+    filtered[1:] += horizontal[:-1] * .1875
+    filtered[:-1] += horizontal[1:] * .1875
+    filtered[0] += horizontal[0] * .1875
+    filtered[-1] += horizontal[-1] * .1875
+    return filtered
+
+
 def _straight(layer):
     result = layer.copy()
     result[..., :3] = np.divide(layer[..., :3], layer[..., 3, None],
@@ -1260,10 +1275,11 @@ def render(scene, output_prefix, settings=None, depth_prepass=None):
     raster_vectors=bool(profiles_active or effect_layers)
     raster_eps=bool(raster_vectors or frame_opacity!=1.)
     streamed_output=width*height>=1048576
+    line_filter = _filter_line_samples if line_only else None
     if streamed_output:
         from .stream_image import scaled_png,depth_png,png_rows
-        scaled_png(Path(paths['beauty']),beauty,ss,_down,_white_matte_rgba if line_only else None)
-    else:_png(Path(paths["beauty"]), _white_matte_rgba(_down(beauty,ss)) if line_only else _down(beauty, ss))
+        scaled_png(Path(paths['beauty']),beauty,ss,_down,_white_matte_rgba if line_only else None, post_filter=line_filter)
+    else:_png(Path(paths["beauty"]), _white_matte_rgba(line_filter(_down(beauty,ss))) if line_only else _down(beauty, ss))
     if auxiliary:
         if streamed_output:
             scaled_png(Path(paths['visible']),visible,ss,_down,_straight)
