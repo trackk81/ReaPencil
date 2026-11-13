@@ -192,6 +192,16 @@ def get_targets(node):
                 shaders=list(dict.fromkeys(_incoming(node + ".shaderTargets"))))
 
 
+def supports_shader_target(node):
+    """Use the same target contract for browsing, quick-add and registration."""
+    if not cmds.objExists(node) or cmds.nodeType(node) == "shadingEngine":
+        return False
+    if cmds.attributeQuery("outColor", node=node, exists=True):
+        return True
+    from . import pencil_unknown
+    return pencil_unknown.kind(node) == 'PencilMaterial'
+
+
 def add_targets(node, targets, kind="objects"):
     if kind not in ("objects", "shaders"):
         raise ValueError("Target kind must be objects or shaders")
@@ -210,8 +220,7 @@ def add_targets(node, targets, kind="objects"):
         for target in targets:
             if cmds.nodeType(target) == "shadingEngine":
                 raise ValueError("Choose a surface shader, not its shading group")
-            from . import pencil_unknown
-            if not cmds.attributeQuery("outColor", node=target, exists=True) and pencil_unknown.kind(target)!='PencilMaterial':
+            if not supports_shader_target(target):
                 raise ValueError("Shader targets require an outColor attribute")
             if target not in existing:
                 indices = cmds.getAttr(node + ".shaderTargets", multiIndices=True) or []

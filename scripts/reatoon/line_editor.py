@@ -553,7 +553,7 @@ def _add_selected(ctx,kind):
     targets=[]
     for node in selected:
         if kind=='shaders':
-            if cmds.attributeQuery('outColor',node=node,exists=True):targets.append(node)
+            if graph.supports_shader_target(node):targets.append(node)
         elif cmds.nodeType(node)=='mesh':
             targets.extend(cmds.listRelatives(node,parent=True,fullPath=True) or [node])
         elif cmds.nodeType(node)=='transform' and (cmds.listRelatives(node,shapes=True,type='mesh') or cmds.listRelatives(node,allDescendents=True,type='mesh')):
@@ -590,7 +590,10 @@ def _chooser(ctx, kind):
         selection = cmds.ls(selection=True,long=True) or []
         if kind == 'shaders':
             registered = set(graph.get_targets(target)['shaders'])
-            candidates = [n for n in (cmds.ls(materials=True) or []) if n not in registered]
+            # Maya includes utility shaders such as aiNormalMap in materials.
+            # Offer only nodes that add_targets can actually register.
+            candidates = [n for n in (cmds.ls(materials=True) or [])
+                          if n not in registered and graph.supports_shader_target(n)]
             if cmds.checkBox(selected_only,query=True,value=True):
                 candidates = [n for n in candidates if n in selection]
         elif cmds.checkBox(selected_only,query=True,value=True):
