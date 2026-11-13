@@ -145,7 +145,7 @@ def segments(points,widths,biases,colors,only,enabled,depth,planes,visible,ss,or
     global _segments_lib
     if _segments_lib is None:
         try:
-            extra=ctypes.CDLL(str(Path(__file__).resolve().parents[2]/'plug-ins/2025/reaPencilSegments159.dll'))
+            extra=ctypes.CDLL(str(Path(__file__).resolve().parents[2]/'plug-ins/2025/reaPencilSegments204.dll'))
             extra.rp_segments159.argtypes=lib.rp_segments.argtypes;extra.rp_segments159.restype=ctypes.c_int
             extra.rp_segments159_free.argtypes=[ctypes.POINTER(ctypes.c_double)];extra.rp_segments159_free.restype=None
             extra.rp_segments159_stats.argtypes=[ctypes.c_void_p];extra.rp_segments159_stats.restype=None

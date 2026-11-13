@@ -33,6 +33,23 @@ def render_segments(segments,camera,depth,depth_planes,visible,hidden,ss,
         colors=np.clip(np.asarray([s['settings']['line_color'] for s in segments],np.float64).reshape(count,3),0,1)
         only=np.asarray([s['settings'].get('output_to_elements_only',False) for s in segments],np.bool_)
         enabled=np.asarray([bool(s['features']) for s in segments],np.bool_)
+    if visibility is not None and backend == "native-cpu-segments":
+        from .renderer import EDGE_FEATURES
+        outline_bit = 1 << EDGE_FEATURES.index('outline')
+        enabled = enabled.astype(np.uint8)
+        if packed:
+            first = 0
+            for part in segments.parts:
+                last = first + part['count']
+                if 'records' in part:
+                    outline = np.asarray(['outline' in row['features'] for row in part['records']])
+                else:
+                    outline = (part['flags'] & outline_bit) != 0
+                enabled[first:last] |= np.where(outline, 4, 0).astype(np.uint8)
+                first = last
+        else:
+            outline = np.asarray(['outline' in row['features'] for row in segments])
+            enabled |= np.where(outline, 4, 0).astype(np.uint8)
     points=(points-np.asarray(camera['eye'])) @ np.asarray(camera['basis']).T
     visibility_stats=np.zeros(2,np.int64)
     channel_hidden=any(s.get('_visibility_mode')==-1 for s in (segments.styles() if packed else [r['settings'] for r in segments]))
@@ -48,7 +65,7 @@ def render_segments(segments,camera,depth,depth_planes,visible,hidden,ss,
             ids=np.flatnonzero((modes==-1)==is_hidden)
             if not len(ids):continue
             flags=enabled[ids].astype(np.uint8)
-            if is_hidden:flags=np.where(flags!=0,np.uint8(3),np.uint8(0))
+            if is_hidden:flags=flags | np.where(flags!=0,np.uint8(2),np.uint8(0))
             counters=np.zeros(2,np.int64)
             rows=render(points[ids],widths[ids],biases[ids],colors[ids],only[ids],flags,depth,depth_planes,hidden if is_hidden else visible,
                         int(ss),bool(camera['ortho']),float(camera['span']),float(camera['focal']),

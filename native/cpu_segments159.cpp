@@ -91,9 +91,14 @@ bool owns=ymin>=rowlo&&ymin<rowhi;bool touched=false;double length=std::sqrt(dx*
  ++profile159.samples;
  int ix=std::min(std::max(int(std::floor(x)),0),w-1),iy=std::min(std::max(int(std::floor(y)),0),h-1);auto pi=int64_t(iy)*w+ix;double value=planes[pi*3]*x+planes[pi*3+1]*y+planes[pi*3+2],surface=ortho?value:(value>0?1/value:INFINITY);if(!std::isfinite(depth[pi]))surface=INFINITY;
  bool front=z<=surface+biases[index]*std::max(1.,z);
- if(context&&front&&z>surface+256*rpvis::epsilon*std::max(1.,std::abs(z))){double rx=(x-w/2.)/(ortho?w/span:focal),ry=-(y-h/2.)/(ortho?w/span:focal),origin[3],direction[3];
+ // At a silhouette the pixel-center winner can miss the stroke's exact
+ // sample position. Confirm rejected outline samples against geometry.
+ const bool check_outline=(enabled[index]&4)!=0 && !front;
+ if(context&&(check_outline||(front&&z>surface+256*rpvis::epsilon*std::max(1.,std::abs(z))))){double rx=(x-w/2.)/(ortho?w/span:focal),ry=-(y-h/2.)/(ortho?w/span:focal),origin[3],direction[3];
  for(int axis=0;axis<3;++axis){if(ortho){origin[axis]=eye[axis]+rx*basis[axis]+ry*basis[3+axis];direction[axis]=basis[6+axis];}else{origin[axis]=eye[axis];direction[axis]=rx*basis[axis]+ry*basis[3+axis]+basis[6+axis];}}
- if(owns)++result->checked;if(occluded159(origin,direction,nearz,z,*context,hit_hints[size_t(pi)&hint_mask])){if(owns)++result->hidden;front=false;}}
+ if(owns)++result->checked;
+ front=!occluded159(origin,direction,nearz,z,*context,hit_hints[size_t(pi)&hint_mask]);
+ if(!front&&owns)++result->hidden;}
  if(enabled[index]&2)front=!front;
  if(!front){if(run){record();run=false;}continue;}
  double sx=px+t0*dx,sy=py+t0*dy,ex=px+t1*dx,ey=py+t1*dy;

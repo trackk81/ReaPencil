@@ -17,7 +17,7 @@ _device_error=None
 _last_api=None
 _deferred_entries=[]
 _deferred_camera_key=None
-_fixed_group_count=0
+_fixed_pass_ranges=[]
 _fixed_segments=0
 _fixed_batches=0
 _group_segment_counts={}
@@ -164,12 +164,12 @@ def prepare(camera_name,aspect,draw_api=4,destination=''):
     except retained_geometry.UnsupportedRetained as error:
         _fallback(camera_name,aspect,str(error),destination)
 
-def _draw_deferred(camera):
+def _draw_deferred(camera, entries):
     """Upload only exceptional silhouette edges; retain all ordinary GPU data."""
     global _profile_payload
     total=batches=0
     _begin_pass()
-    for data,styles,offset,mesh_id in _deferred_entries:
+    for data,styles,offset,mesh_id in entries:
         visible=retained_geometry.deferred_camera_mask(data,camera)
         for owner in np.unique(data['owners'][visible]):
             selected=visible&(data['owners']==owner)
@@ -190,7 +190,7 @@ def _draw_deferred(camera):
 
 def _prepare(camera_name,aspect,destination=""):
     global _key,_passes,_geometry_style_key,_deferred_entries,_deferred_camera_key
-    global _fixed_group_count,_fixed_segments,_fixed_batches
+    global _fixed_pass_ranges,_fixed_segments,_fixed_batches
     global _fixed_profile_payload
     global _surface_neighbor_payload
     from . import surface_lines,preview_brush_navigation as navigation
@@ -216,8 +216,21 @@ def _prepare(camera_name,aspect,destination=""):
             vp._last_report.update(prepare_ms=(time.perf_counter()-started)*1000,
                                    geometry_updated=False,retained_geometry_reused=True)
             return
-        _library.rt_begin();_library.rt_reuse(0,_fixed_group_count)
-        count,batches=_draw_deferred(camera);_library.rt_end();_deferred_camera_key=camera_key
+        _library.rt_begin()
+        count=batches=0
+        ranges=[]
+        for first,groups,offset in _fixed_pass_ranges:
+            new_first=_library.rt_group_count()
+            ranges.append((new_first,groups,offset))
+            if new_first!=first:
+                item=next(p for p in _passes if p['retained_style_offset']==offset and p['styles'])
+                item['edge_ranges']={i:(start+new_first-first,length,segments)
+                                     for i,(start,length,segments) in item['edge_ranges'].items()}
+            _library.rt_reuse(first,groups)
+            added,draws=_draw_deferred(camera,(e for e in _deferred_entries if e[2]==offset))
+            count+=added;batches+=draws
+        _library.rt_end();_deferred_camera_key=camera_key
+        _fixed_pass_ranges=ranges
         vp._last_report.update(segments=_fixed_segments+count,submitted_segments=_fixed_segments+count,
             batches=_fixed_batches+batches,exceptional_visible_segments=count,retained_geometry_reused=True,
             prepare_ms=(time.perf_counter()-started)*1000)
@@ -349,11 +362,15 @@ def _prepare(camera_name,aspect,destination=""):
             try:_add_bounded(p,q,item['retained_style_offset']+int(owner),float(style.get('line_width',1.5)),color)
             finally:_profile_payload=None;_surface_neighbor_payload=old_neighbors;_fixed_profile_payload=old_fixed
             total+=len(p);batch_count+=1
+    _fixed_pass_ranges=[]
+    deferred_count=deferred_batches=0
     if not live.empty:
         for item in _passes:
             _begin_pass()
             styles=item['styles']
             if not styles:continue
+            pass_first=_library.rt_group_count()
+            deferred_first=len(_deferred_entries)
             gpu=live.gpu;gpu.configure_face_styles(item['face_style_ids'],len(styles),item.get('selected_edges'))
             gpu.set_camera(camera) # No viewport_clip: retain ALL pages and future views.
             cross,owners,report=gpu.intersections(styles,settings.get('intersection_tolerance',1e-7))
@@ -409,13 +426,12 @@ def _prepare(camera_name,aspect,destination=""):
                     item['deferred_cache'][i]=data['deferred']
                     _deferred_entries.append((data['deferred'],styles,item['retained_style_offset'],i))
                 if partial:item['edge_ranges'][i]=(first,_library.rt_group_count()-first,len(data['owners']))
-    # Keep authored line-pass compositing order. Exceptional strokes currently
-    # form a small tail group; with multiple passes that tail could overpaint a
-    # later line. The established complete path remains the oracle for that case.
-    if _deferred_entries and len(_passes)>1:
-        raise retained_geometry.UnsupportedRetained('Multiple line passes with exceptional silhouettes use the legacy GPU viewport')
-    _fixed_group_count=_library.rt_group_count();_fixed_segments=total;_fixed_batches=batch_count
-    deferred_count,deferred_batches=_draw_deferred(camera)
+            offset=item['retained_style_offset']
+            _fixed_pass_ranges.append((pass_first,_library.rt_group_count()-pass_first,offset))
+            if len(_deferred_entries)>deferred_first:
+                added,draws=_draw_deferred(camera,_deferred_entries[deferred_first:])
+                deferred_count+=added;deferred_batches+=draws
+    _fixed_segments=total;_fixed_batches=batch_count
     total+=deferred_count;batch_count+=deferred_batches;edge_total+=deferred_count
     _deferred_camera_key=camera_key
     native_groups=_library.rt_group_count();_library.rt_end()
