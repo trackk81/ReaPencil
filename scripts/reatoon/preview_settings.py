@@ -69,10 +69,10 @@ def rebuild():
     cmds.refresh(force=True)
 
 def set_option(name,enabled):
-    from . import viewport_alpha
-    if name not in (SMOOTH,INTERSECTIONS,PROFILES,BRUSH_NAVIGATION,viewport_alpha.OPTION):raise ValueError('Unknown viewport preference')
+    from . import viewport_alpha,viewport_alpha_gpu
+    if name not in (SMOOTH,INTERSECTIONS,PROFILES,BRUSH_NAVIGATION,viewport_alpha.OPTION,viewport_alpha_gpu.OPTION):raise ValueError('Unknown viewport preference')
     cmds.optionVar(intValue=(name,int(bool(enabled))))
-    if name==viewport_alpha.OPTION:
+    if name in (viewport_alpha.OPTION,viewport_alpha_gpu.OPTION):
         from . import viewport
         viewport._watchers_stale=True
     if name in (PROFILES,BRUSH_NAVIGATION):
@@ -88,7 +88,7 @@ def show():
     from . import i18n
     def label(en,ko):return en if i18n.language()=='en' else ko
     if cmds.window(WINDOW,exists=True):cmds.deleteUI(WINDOW)
-    cmds.window(WINDOW,title=label('ReaPencil — Preview Performance','ReaPencil — 프리뷰 성능 설정'),widthHeight=(460,590),sizeable=False)
+    cmds.window(WINDOW,title=label('ReaPencil — Preview Performance','ReaPencil — 프리뷰 성능 설정'),widthHeight=(460,700),sizeable=True)
     cmds.columnLayout(adjustableColumn=True,rowSpacing=12)
     cmds.text(label=label('Viewport calculation only. Edit line styles in the Line Window.','뷰포트 계산 전용입니다. 선 스타일은 라인 창에서 편집하세요.'),align='left',wordWrap=True,height=36)
     cmds.checkBox('reaPencilPreviewSmoothControl',label=label('Smooth line geometry with the viewport mesh','뷰포트 메시의 스무스를 선에도 적용'),value=load()['enabled_smooth_mesh'],changeCommand=lambda v:set_option(SMOOTH,v))
@@ -100,6 +100,10 @@ def show():
     cmds.text(label=label('Reuse brush/dash detail while navigating; refresh the exact view after stopping. CPU output is unchanged.','이동 중 붓·대시 표시를 재사용하고 멈추면 현재 시점의 상세 표시로 갱신합니다. CPU 렌더는 유지됩니다.'),align='left',wordWrap=True,height=42)
     from . import viewport_alpha
     cmds.checkBox('reaPencilPreviewAutoAlphaControl',label=label('Detect alpha boundaries from materials','재질 알파 경계 자동 인식'),value=viewport_alpha.enabled(),changeCommand=lambda v:set_option(viewport_alpha.OPTION,v))
+    from . import viewport_alpha_gpu
+    cmds.checkBox('reaPencilPreviewGPUAlphaControl',label=label('Fast leaf alpha contours (experimental)','잎 알파 윤곽 고속 표시 (실험)'),value=value(viewport_alpha_gpu.OPTION,False),changeCommand=lambda v:set_option(viewport_alpha_gpu.OPTION,v))
+    cmds.text(label=label('Requires intersections off. Basic alpha contours only; stroke profiles, textured brushes and physical card edges use the precise mode. CPU rendering is unchanged.',
+        '교차선 계산을 끈 상태에서 사용합니다. 잎의 기본 알파 윤곽 전용입니다. 붓·곡선이나 카드 가장자리까지 정확히 보려면 이 옵션을 끄세요. CPU 렌더는 유지됩니다.'),align='left',wordWrap=True,height=56)
     cmds.button(label=label('List meshes with alpha errors','알파 오류 메시 목록'),command=lambda *_:show_alpha_failures())
     resolution=cmds.optionMenuGrp('reaPencilPreviewAlphaResolutionControl',label=label('Alpha boundary resolution','알파 경계 해상도'))
     current=viewport_alpha.resolution()

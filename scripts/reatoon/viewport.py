@@ -272,6 +272,8 @@ def _start_callbacks():
 
 def _release_gpu_scene(*_):
     global _gpu_scene,_gpu_rebuild,_native_last_groups,_graph_mode
+    from . import preview_maps
+    preview_maps.reset_scene()
     scene=_gpu_scene;_gpu_scene=None;_gpu_rebuild=True;_native_last_groups=None
     _graph_mode=False
     if scene is not None:scene.close()
@@ -720,7 +722,9 @@ def register(plugin_fn):
     global _registered, _native_lib, _native_plugin, _retained_native, DRAW_CLASSIFICATION
     from pathlib import Path
     native_dir=Path(__file__).resolve().parents[2]/'plug-ins'/cmds.about(version=True)
-    retained=native_dir/'reaPencilDraw206.mll'
+    retained=native_dir/'reaPencilDraw227.mll'
+    if not retained.is_file():retained=native_dir/'reaPencilDraw212.mll'
+    if not retained.is_file():retained=native_dir/'reaPencilDraw206.mll'
     if not retained.is_file():retained=native_dir/'reaPencilDraw190.mll'
     if not retained.is_file():retained=native_dir/'reaPencilDraw088.mll'
     if not retained.is_file():retained=native_dir/'reaPencilDraw087.mll'
@@ -736,8 +740,8 @@ def register(plugin_fn):
         if (native.is_file() and os.environ.get('REVTOON_VIEWPORT_BACKEND','gpu')!='cpu'
                 and os.environ.get('REVTOON_NATIVE_DRAW','1')!='0'):
             import ctypes as c
-            if native.stem in ('reaPencilDraw087','reaPencilDraw088','reaPencilDraw090','reaPencilDraw163','reaPencilDraw170','reaPencilDraw171','reaPencilDraw172','reaPencilDraw180','reaPencilDraw190','reaPencilDraw206'):
-                for previous in ('reaPencilDraw084','reaPencilDraw087','reaPencilDraw088','reaPencilDraw090','reaPencilDraw163','reaPencilDraw170','reaPencilDraw171','reaPencilDraw172','reaPencilDraw180','reaPencilDraw190','reaPencilDraw206'):
+            if native.stem in ('reaPencilDraw087','reaPencilDraw088','reaPencilDraw090','reaPencilDraw163','reaPencilDraw170','reaPencilDraw171','reaPencilDraw172','reaPencilDraw180','reaPencilDraw190','reaPencilDraw206','reaPencilDraw212','reaPencilDraw227'):
+                for previous in ('reaPencilDraw084','reaPencilDraw087','reaPencilDraw088','reaPencilDraw090','reaPencilDraw163','reaPencilDraw170','reaPencilDraw171','reaPencilDraw172','reaPencilDraw180','reaPencilDraw190','reaPencilDraw206','reaPencilDraw212','reaPencilDraw227'):
                     if previous==native.stem:continue
                     if cmds.pluginInfo(previous,q=True,registered=True) and cmds.pluginInfo(previous,q=True,loaded=True):
                         if not cmds.pluginInfo(previous,q=True,unloadOk=True):raise RuntimeError('Restart Maya to update the GPU viewport module.')

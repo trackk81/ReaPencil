@@ -150,11 +150,82 @@ def expand(points,style,camera,scale=1.,phase=None):
         if len(pairs):output.append((pairs,parameters,bool(texture)))
     return output
 
+def iter_packed_brush_parts(segments, camera, scale):
+    from .cpu_brush import _clip_packed_depth
+    from .preview_brush_batch import domains as batch_domains
+    from .preview_brush_native import expand as native_expand
+
+    segments = _clip_packed_depth(segments, camera, scale, brush_margin=True)
+    sample_camera = dict(camera, width=camera['width']/scale,
+                         height=camera['height']/scale, focal=camera['focal']/scale)
+    children = {}
+    groups = {}
+    for index, part in enumerate(segments.parts):
+        style = part['settings']
+        if active(style):
+            groups.setdefault((part['mesh_index'], id(style)), []).append(index)
+    phases = {}
+    for indices in groups.values():
+        points = np.concatenate([segments.parts[i]['points'] for i in indices])
+        coordinates = batch_domains(points, camera)
+        start = 0
+        for index in indices:
+            end = start + segments.parts[index]['count']
+            phases[index] = coordinates[start:end]
+            start = end
+
+    for index, part in enumerate(segments.parts):
+        style = part['settings']
+        if not active(style):
+            yield part
+            continue
+        points = part['points']
+        # Bound the native output per call for long projected lines.
+        for start in range(0, len(points), 8192):
+            end = min(start+8192, len(points))
+            batch = native_expand(points[start:end], style, sample_camera, phases[index][start:end]/scale)
+            if batch is None:
+                for row in range(start, end):
+                    for expanded, _, thin in expand(points[row], style, camera, scale, phases[index][row]):
+                        child = children.setdefault(id(style), lane_style(style)) if thin else style
+                        yield dict(part, points=expanded, settings=child, count=len(expanded),
+                                    flags=np.full(len(expanded), part['flags'][row], np.uint8))
+                continue
+            expanded, _, source, thin = batch
+            if len(source):
+                # Keep the source order even when clipped strokes use the base width.
+                bounds = np.r_[0, np.flatnonzero(thin[1:] != thin[:-1])+1, len(thin)]
+                for lo, hi in zip(bounds[:-1], bounds[1:]):
+                    child = children.setdefault(id(style), lane_style(style)) if thin[lo] else style
+                    yield dict(part, points=expanded[lo:hi], settings=child, count=int(hi-lo),
+                                flags=part['flags'][start+source[lo:hi]])
+
+
+def _packed_brush_segments(segments, camera, scale):
+    from .packed_segments import PackedSegments
+    out = PackedSegments()
+    for part in iter_packed_brush_parts(segments, camera, scale):
+        out.parts.append(part)
+        out.count += part['count']
+        if part.get('intersection'):
+            out.intersection_count += part['count']
+    return out
+
+
 def cpu_segments(segments,camera,scale):
     """Leave ordinary geometry packed and untouched; expand opted-in brushes."""
     from .packed_segments import PackedSegments
     from .renderer import EDGE_FEATURES
     if not any(active(s) for s in (segments.styles() if hasattr(segments,'styles') else [v['settings'] for v in segments])):return segments
+    if hasattr(segments, 'parts'):
+        segments._flush()
+        if all('records' not in part and 'profile_u' not in part and 'vertex_ids' not in part and 'map_uvs' not in part
+               for part in segments.parts) and all(
+            not s.get('width_profile') and not s.get('alpha_profile')
+            and (not active(s) or (not s.get('line_pattern') and s.get('brush_preset') in (1, 2, 3)))
+            for s in segments.styles()
+        ):
+            return _packed_brush_segments(segments, camera, scale)
     from .profile_strokes import assign_coordinates
     from .renderer import _project
     records=assign_coordinates(segments,camera,_project)
@@ -167,13 +238,29 @@ def cpu_segments(segments,camera,scale):
     out=PackedSegments();cache={}
     for i,row in enumerate(records):
         style=row['settings']
-        if not active(style):out.append(row);continue
+        if not active(style):
+            # Preserve packed geometry when only another feature has a preset.
+            flags=128 if 'intersection' in row['features'] else sum(1<<EDGE_FEATURES.index(v) for v in row['features'])
+            out._flush();part=dict(points=np.asarray([[row['a'],row['b']]],float),flags=np.array([flags],np.uint8),settings=style,mesh=row['mesh'],mesh_index=row['mesh_index'],line=row.get('line'),count=1)
+            if '_profile_u' in row:part['profile_u']=np.asarray([row['_profile_u']],float)
+            if '_map_uvs' in row:part['map_uvs']={k:np.asarray([v],float) for k,v in row['_map_uvs'].items()}
+            if '_vertex_ids' in row:part['vertex_ids']=np.asarray([row['_vertex_ids']],np.int64)
+            if flags==128:part['intersection']=True;out.intersection_count+=1
+            out.parts.append(part);out.count+=1
+            continue
         flags=128 if 'intersection' in row['features'] else sum(1<<EDGE_FEATURES.index(v) for v in row['features'])
         for points,t,thin in expand([row['a'],row['b']],style,camera,scale,distances[i]):
             child=cache.setdefault((id(style),thin),variant_style(style,thin))
             out._flush();part=dict(points=points,flags=np.full(len(points),flags,np.uint8),settings=child,mesh=row['mesh'],mesh_index=row['mesh_index'],line=row.get('line'),count=len(points))
             if '_profile_u' in row:
                 a,b=row['_profile_u'];part['profile_u']=a+t*(b-a)
+            if '_map_uvs' in row:
+                # expand() returns raster-linear coordinates; UVs remain on the
+                # original surface centreline, even for displaced brush lanes.
+                pc=(np.asarray([row['a'],row['b']])-camera['eye'])@camera['basis'].T
+                z0,z1=pc[:,2]
+                r=t if camera['ortho'] else (t/z1)/((1-t)/z0+t/z1)
+                part['map_uvs']={k:uv[0]+r[...,None]*(uv[1]-uv[0]) for k,value in row['_map_uvs'].items() for uv in [np.asarray(value)]}
             out.parts.append(part);out.count+=len(points)
             if flags==128:part['intersection']=True;out.intersection_count+=len(points)
     return out

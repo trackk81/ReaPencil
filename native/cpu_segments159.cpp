@@ -11,6 +11,9 @@
 #include <atomic>
 #define API extern "C" __declspec(dllexport)
 #include "cpu_visibility.h"
+#include "cpu_parallel222.h"
+#include "cpu_alpha_trim222.h"
+#include "cpu_alpha_edges222.h"
 struct Projected159 {int64_t index;double az,bz,px,py,dx,dy,lo,hi;int xmin,ymin,xmax,ymax;};
 struct Profile159 {uint64_t samples=0,strokes=0,stroke_pixels=0,composite_pixels=0,ray_trees=0,cache_hits=0;};
 thread_local Profile159 profile159;thread_local double last_profile159[9]={};
@@ -28,7 +31,7 @@ static void project159(const double* points,const double* widths,const uint8_t* 
  }
 }
 struct Hit159 {const double* triangle=nullptr;int64_t node=0;};
-static bool triangle_occludes159(const double* o,const double* d,double nearz,double farz,const double* t){
+static bool triangle_occludes159(const double* o,const double* d,double nearz,double farz,const double* t,const rpvis::Context& c){
  double ex=t[3]-t[0],ey=t[4]-t[1],ez=t[5]-t[2],fx=t[6]-t[0],fy=t[7]-t[1],fz=t[8]-t[2];
  double dx=d[0],dy=d[1],dz=d[2],hx=dy*fz-dz*fy,hy=dz*fx-dx*fz,hz=dx*fy-dy*fx,det=ex*hx+ey*hy+ez*hz;if(det==0)return false;
  double sx=o[0]-t[0],sy=o[1]-t[1],sz=o[2]-t[2],u=(sx*hx+sy*hy+sz*hz)/det;if(u<0||u>1)return false;
@@ -37,18 +40,18 @@ static bool triangle_occludes159(const double* o,const double* d,double nearz,do
  dp+=std::abs(ex)*(std::abs(dy*fz)+std::abs(dz*fy));dp+=std::abs(ey)*(std::abs(dz*fx)+std::abs(dx*fz));dp+=std::abs(ez)*(std::abs(dx*fy)+std::abs(dy*fx));
  np+=std::abs(fx)*(std::abs(sy*ez)+std::abs(sz*ey));np+=std::abs(fy)*(std::abs(sz*ex)+std::abs(sx*ez));np+=std::abs(fz)*(std::abs(sx*ey)+std::abs(sy*ex));
  double de=64*rpvis::epsilon*dp,den=std::abs(det)-de;if(den<=0)return false;double error=(64*rpvis::epsilon*np+std::abs(distance)*de)/den;
- if(nearz<=distance&&distance+error<farz)return true;
+ if(nearz<=distance&&distance+error<farz&&rpalpha::opaque(c.alpha,(t-c.tri)/9,u,v))return true;
  return false;
 }
 static bool occluded159(const double* o,const double* d,double nearz,double limit,const rpvis::Context& c,Hit159& cache){
  // A balanced int64-indexed tree cannot exceed 64 levels.
  int64_t stack[128];double magnitude=std::max({1.,std::abs(o[0]),std::abs(o[1]),std::abs(o[2]),std::max({std::abs(d[0]),std::abs(d[1]),std::abs(d[2])})*std::abs(limit)});
  double farz=limit-256*rpvis::epsilon*magnitude;
- if(cache.triangle&&rpvis::box(o,d,c.low+cache.node*3,c.high+cache.node*3,nearz,farz)&&triangle_occludes159(o,d,nearz,farz,cache.triangle)){++profile159.cache_hits;return true;}
+ if(cache.triangle&&rpvis::box(o,d,c.low+cache.node*3,c.high+cache.node*3,nearz,farz)&&triangle_occludes159(o,d,nearz,farz,cache.triangle,c)){++profile159.cache_hits;return true;}
  ++profile159.ray_trees;for(int64_t root=0;root<c.nr;++root){int pending=1;stack[0]=c.roots[root];while(pending){auto node=stack[--pending];if(!rpvis::box(o,d,c.low+node*3,c.high+node*3,nearz,farz))continue;
  if(c.child[node*2]>=0){stack[pending++]=c.child[node*2];stack[pending++]=c.child[node*2+1];continue;}
  for(auto slot=c.ranges[node*2];slot<c.ranges[node*2+1];++slot){auto t=c.tri+c.order[slot]*9;
- if(triangle_occludes159(o,d,nearz,farz,t)){cache.triangle=t;cache.node=node;return true;}
+ if(triangle_occludes159(o,d,nearz,farz,t,c)){cache.triangle=t;cache.node=node;return true;}
  }}}return false;
 }
 void stroke_band159(float* layer,int first,int last,int* left,int* right,int w,int h,int64_t stride,double ax,double ay,double bx,double by,double width,const double* color){
@@ -58,17 +61,22 @@ void stroke_band159(float* layer,int first,int last,int* left,int* right,int w,i
  y0=std::max(y0,first);y1=std::min(y1,last-1);
  if(x1>=x0&&y1>=y0)profile159.stroke_pixels+=int64_t(x1-x0+1)*(y1-y0+1);++profile159.strokes;
  double vx=bx-ax,vy=by-ay,den=std::max(vx*vx+vy*vy,1e-15);
- for(int y=y0;y<=y1;++y)for(int x=x0;x<=x1;++x){double t=((x+.5-ax)*vx+(y+.5-ay)*vy)/den;t=std::min(std::max(t,0.),1.);
+ for(int y=y0;y<=y1;++y)for(int x=x0;x<=x1;++x){
+ auto p=layer+(y-first)*stride+x*4;
+ // Coverage is clamped to one and this temporary layer keeps its maximum.
+ // A saturated pixel cannot change, so retain its exact value and color.
+ if(p[3]>=1.f)continue;
+ double t=((x+.5-ax)*vx+(y+.5-ay)*vy)/den;t=std::min(std::max(t,0.),1.);
  double ex=x+.5-(ax+t*vx),ey=y+.5-(ay+t*vy),q=ex*ex+ey*ey;
  double outer=radius+.5,inner=radius-.5,alpha;
  // Avoid hypot only well beyond a clamp boundary. Fractional coverage keeps
  // the original hypot and subtraction, including all near-threshold cases.
  if(q>outer*outer*(1+64*rpvis::epsilon))alpha=0.;
  else if(inner>=0&&q<inner*inner*(1-64*rpvis::epsilon))alpha=1.;
- else alpha=std::min(std::max(radius+.5-std::hypot(ex,ey),0.),1.);auto p=layer+(y-first)*stride+x*4;
+ else alpha=std::min(std::max(radius+.5-std::hypot(ex,ey),0.),1.);
  if(alpha>p[3]){left[y-first]=std::min(left[y-first],x);right[y-first]=std::max(right[y-first],x+1);for(int k=0;k<3;++k)p[k]=float(color[k]*alpha);p[3]=float(alpha);}}
 }
-static int segment_range159(const std::vector<Projected159>& projected,const std::vector<size_t>& ids,const double* points,const double* widths,const double* biases,const double* colors,const uint8_t* only,const uint8_t* enabled,int64_t n,const double* depth,const double* planes,float* visible,int w,int h,int ss,int ortho,double span,double focal,double nearz,double farz,const rpvis::Context* context,const double* eye,const double* basis,SegmentResult* result,int rowlo,int rowhi) noexcept {
+static int segment_range159(const std::vector<Projected159>& projected,const std::vector<size_t>& ids,const double* points,const double* widths,const double* biases,const double* colors,const uint8_t* only,const uint8_t* enabled,int64_t n,const double* depth,const double* planes,float* visible,int w,int h,int ss,int ortho,double span,double focal,double nearz,double farz,const rpvis::Context* context,const double* eye,const double* basis,SegmentResult* result,int rowlo,int rowhi,bool count_only) noexcept {
  try{*result={};std::vector<double> records;std::vector<float> edge;std::vector<int> left,right;
  // A previous triangle is only a hint: each current ray still passes the
  // original AABB and robust triangle predicates. Hash collisions are safe.
@@ -81,7 +89,7 @@ static int segment_range159(const std::vector<Projected159>& projected,const std
  int xmin=item.xmin,ymin=item.ymin,xmax=item.xmax,ymax=item.ymax;
  int band_begin=std::max(0,rowlo-ymin),band_end=std::min(ymax-ymin,rowhi-ymin);
 bool owns=ymin>=rowlo&&ymin<rowhi;bool touched=false;double length=std::sqrt(dx*dx+dy*dy);int count=std::max(1,int(std::ceil(length*(hi-lo)*1.5)));double step=(hi-lo)/count;bool run=false;double ax=0,ay=0,bx=0,by=0;
- auto record=[&](){if(owns)records.insert(records.end(),{double(index),ax,ay,bx,by});};
+ auto record=[&](){if(!owns)return;if(count_only){if(!only[index])++result->size;}else records.insert(records.end(),{double(index),ax,ay,bx,by});};
  for(int k=0;k<count;++k){double t0=lo+k*step,t1=k+1==count?hi:lo+(k+1)*step,mid=(t0+t1)*.5,x=px+mid*dx,y=py+mid*dy,z=ortho?a[2]+mid*(b[2]-a[2]):1/((1-mid)/a[2]+mid/b[2]);
  // Vector records belong to one band. Other bands need only samples whose
  // capsule can touch their pixels; use the original sample arithmetic and
@@ -106,19 +114,31 @@ bool owns=ymin>=rowlo&&ymin<rowhi;bool touched=false;double length=std::sqrt(dx*
  if(!run){ax=sx/ss;ay=sy/ss;run=true;}bx=ex/ss;by=ey/ss;}
  if(run)record();if(touched){for(int y=std::max(0,rowlo-ymin);y<std::min(ymax-ymin,rowhi-ymin);++y)for(int x=(profile159.composite_pixels+=std::max(0,right[y-band_begin]-left[y-band_begin]),left[y-band_begin]);x<right[y-band_begin];++x){auto e=edge.data()+(int64_t(y-band_begin)*(xmax-xmin)+x)*4;auto v=visible+(int64_t(y+ymin)*w+x+xmin)*4;float inv=1.f-e[3];for(int c=0;c<4;++c){float product=float(v[c]*inv);v[c]=float(e[c]+product);}}}
  }
- result->size=records.size()/5;if(!records.empty()){result->rows=new double[records.size()];std::copy(records.begin(),records.end(),result->rows);}return 0;
+ if(!count_only)result->size=records.size()/5;if(!records.empty()){result->rows=new double[records.size()];std::copy(records.begin(),records.end(),result->rows);}return 0;
  }catch(...){return -1;}
 }
 
-API int rp_segments159(const double* points,const double* widths,const double* biases,const double* colors,const uint8_t* only,const uint8_t* enabled,int64_t n,const double* depth,const double* planes,float* visible,int w,int h,int ss,int ortho,double span,double focal,double nearz,double farz,const rpvis::Context* context,const double* eye,const double* basis,SegmentResult* result) noexcept {
- unsigned workers=n>=10000?std::min(8u,std::max(1u,std::thread::hardware_concurrency())):1;
+API int rp_segments222(const double* points,const double* widths,const double* biases,const double* colors,const uint8_t* only,const uint8_t* enabled,int64_t n,const double* depth,const double* planes,float* visible,int w,int h,int ss,int ortho,double span,double focal,double nearz,double farz,const rpvis::Context* context,const double* eye,const double* basis,SegmentResult* result,int count_only) noexcept {
+ unsigned workers=n>=10000?std::min(12u,std::max(1u,std::thread::hardware_concurrency())):1;
  struct Rows {std::vector<SegmentResult> data;Rows(unsigned n):data(n){}~Rows(){for(auto& r:data)delete[] r.rows;}};
  unsigned bands=workers>1?std::min(32u,unsigned(h)):1;
  try{Rows parts(bands);
   auto timer159=std::chrono::steady_clock::now();
   std::vector<Profile159> profiles159(bands);
   std::vector<Projected159> projected;projected.reserve(size_t(std::min(n,int64_t(262144))));
-  project159(points,widths,enabled,n,w,h,ss,ortho,span,focal,nearz,farz,projected);
+  if(workers==1)project159(points,widths,enabled,n,w,h,ss,ortho,span,focal,nearz,farz,projected);
+  else {
+   std::vector<std::vector<Projected159>> pieces(workers);std::vector<int> failed(workers,0);
+   auto project=[&](unsigned worker){try{
+    int64_t first=n*worker/workers,count=n*(worker+1)/workers-first;
+    pieces[worker].reserve(size_t(count));
+    project159(points+first*6,widths+first,enabled+first,count,w,h,ss,ortho,span,focal,nearz,farz,pieces[worker]);
+    for(auto& item:pieces[worker])item.index+=first;
+   }catch(...){failed[worker]=1;}};
+   rp222::parallel(workers,project);size_t count=0;
+   for(unsigned i=0;i<workers;++i){if(failed[i])return -1;count+=pieces[i].size();}
+   projected.reserve(count);for(auto& part:pieces)projected.insert(projected.end(),part.begin(),part.end());
+  }
   std::vector<std::vector<size_t>> bins(bands);
   for(size_t j=0;j<projected.size();++j){
    unsigned begin=unsigned(std::max(0,projected[j].ymin))*bands/h;
@@ -127,19 +147,22 @@ API int rp_segments159(const double* points,const double* widths,const double* b
   }
 
   double project_seconds159=std::chrono::duration<double>(std::chrono::steady_clock::now()-timer159).count();timer159=std::chrono::steady_clock::now();
-  std::vector<int> codes(bands);std::vector<std::thread> threads;
-  auto band=[&](unsigned i){profile159={};codes[i]=segment_range159(projected,bins[i],points,widths,biases,colors,only,enabled,n,depth,planes,visible,w,h,ss,ortho,span,focal,nearz,farz,context,eye,basis,&parts.data[i],int(i*h/bands),int((i+1)*h/bands));profiles159[i]=profile159;};
+  std::vector<int> codes(bands);
+  auto band=[&](unsigned i){profile159={};codes[i]=segment_range159(projected,bins[i],points,widths,biases,colors,only,enabled,n,depth,planes,visible,w,h,ss,ortho,span,focal,nearz,farz,context,eye,basis,&parts.data[i],int(i*h/bands),int((i+1)*h/bands),count_only!=0);profiles159[i]=profile159;};
   std::atomic<unsigned> next159{0};auto run=[&](unsigned){for(;;){unsigned i=next159.fetch_add(1);if(i>=bands)break;band(i);}};
-  try{for(unsigned i=1;i<workers;++i)threads.emplace_back(run,i);}catch(...){for(auto& t:threads)t.join();throw;}run(0);for(auto& t:threads)t.join();
+  rp222::parallel(workers,run);
   std::fill(last_profile159,last_profile159+9,0.);last_profile159[0]=project_seconds159;last_profile159[1]=std::chrono::duration<double>(std::chrono::steady_clock::now()-timer159).count();last_profile159[8]=double(projected.size());
   for(auto& p:profiles159){last_profile159[2]+=p.samples;last_profile159[3]+=p.strokes;last_profile159[4]+=p.stroke_pixels;last_profile159[5]+=p.composite_pixels;last_profile159[6]+=p.ray_trees;last_profile159[7]+=p.cache_hits;}
   *result={};int64_t size=0;for(unsigned i=0;i<bands;++i){if(codes[i])return -1;size+=parts.data[i].size;result->checked+=parts.data[i].checked;result->hidden+=parts.data[i].hidden;}
+  if(count_only){result->size=size;return 0;}
   struct Row {double value[5];};std::vector<Row> rows;rows.reserve(size);
   for(auto& r:parts.data)for(int64_t i=0;i<r.size;++i){Row row;std::copy(r.rows+i*5,r.rows+i*5+5,row.value);rows.push_back(row);}
   std::stable_sort(rows.begin(),rows.end(),[](const Row& a,const Row& b){return a.value[0]<b.value[0];});
   if(size){result->rows=new double[size*5];for(int64_t i=0;i<size;++i)std::copy(rows[i].value,rows[i].value+5,result->rows+i*5);}result->size=size;return 0;
  }catch(...){return -1;}
 }
+
+API int rp_segments159(const double* points,const double* widths,const double* biases,const double* colors,const uint8_t* only,const uint8_t* enabled,int64_t n,const double* depth,const double* planes,float* visible,int w,int h,int ss,int ortho,double span,double focal,double nearz,double farz,const rpvis::Context* context,const double* eye,const double* basis,SegmentResult* result) noexcept {return rp_segments222(points,widths,biases,colors,only,enabled,n,depth,planes,visible,w,h,ss,ortho,span,focal,nearz,farz,context,eye,basis,result,0);}
 
 API void rp_segments159_free(double* rows) noexcept {delete[] rows;}
 API void rp_segments159_stats(double* out) noexcept {std::copy(last_profile159,last_profile159+9,out);}

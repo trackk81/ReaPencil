@@ -10,6 +10,7 @@ from . import alpha_boundary as alpha
 OPTION='reaPencilPreviewAutoAlpha'
 RESOLUTION='reaPencilPreviewAlphaResolution'
 DEFAULT_RESOLUTION=2048
+MAX_EXTRA_CUTOUT_TRIANGLES=50_000
 _warnings=set()
 _discoveries=0
 _configurations=0
@@ -45,6 +46,7 @@ def transform_mesh(mesh,path,evaluated,config):
     CPU exports keep their strict alpha_boundary.transform_mesh contract.
     """
     global _attempts,_failure_hits
+    from . import viewport_alpha_gpu
     key=om.MFnDependencyNode(path.node()).uuid().asString()
     previous=_failures.get(key)
     signature=None
@@ -56,12 +58,17 @@ def transform_mesh(mesh,path,evaluated,config):
             mesh['viewport_alpha_fallback']=previous[1]
             return mesh
         del _failures[key]
+    if config.get('_gpu_alpha') and viewport_alpha_gpu.enabled():
+        try:return viewport_alpha_gpu.prepare(mesh,path,evaluated,config)
+        except (ValueError,RuntimeError,OSError) as error:_warn(mesh['name']+': '+str(error))
     # transform_mesh changes nested line-pass dictionaries only after clipping.
     # Keep even a late validation failure from partially changing live metadata.
     candidate=dict(mesh)
     if 'line_passes' in mesh:candidate['line_passes']=[dict(p) for p in mesh['line_passes']]
     _attempts+=1
-    try:alpha.transform_mesh(candidate,path,evaluated,config,_cell_cache={})
+    try:
+        alpha.transform_mesh(candidate,path,evaluated,config,_cell_cache={},
+                             _triangle_budget=len(mesh['triangles'])+MAX_EXTRA_CUTOUT_TRIANGLES)
     except (ValueError,RuntimeError,OSError) as error:
         message=mesh['name']+': alpha boundary unavailable; preview uses the original surface. '+str(error)
         try:signature=_signature(mesh,path,evaluated,config)
@@ -112,7 +119,12 @@ def configuration(shape):
     global _configurations
     _configurations+=1
     # Explicit settings (including a disabled setting) keep their original meaning.
-    if cmds.attributeQuery(alpha.ATTRIBUTE,node=shape,exists=True):return alpha.configuration(shape)
+    if cmds.attributeQuery(alpha.ATTRIBUTE,node=shape,exists=True):
+        config=alpha.configuration(shape)
+        if config:
+            from . import viewport_alpha_gpu
+            if viewport_alpha_gpu.enabled():config=dict(config,_gpu_alpha=True)
+        return config
     if not enabled():return None
     try:
         found=sources(shape)
@@ -125,7 +137,11 @@ def configuration(shape):
                 if os.path.isfile(expanded):raw=expanded
             source['path']=raw
         config=dict(version=1,enabled=True,threshold=.5,resolution=resolution(),simplify=.25,sources=found)
-        for source in found.values():alpha._cells(source,config)
+        from . import viewport_alpha_gpu
+        if viewport_alpha_gpu.enabled():
+            config['_gpu_alpha']=True
+        else:
+            for source in found.values():alpha._cells(source,config)
         return config
     except (ValueError,OSError,RuntimeError) as error:
         _warn(error);return None

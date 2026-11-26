@@ -7,6 +7,7 @@
 #include <limits>
 #include <thread>
 #include <atomic>
+#include <stdexcept>
 #define API extern "C" __declspec(dllexport)
 API int rp_facts(const double* v,const int64_t* tri,int64_t n,double* pos,double* low,double* high,double* norm,double* area,double* longest) noexcept {
  try {for(int64_t i=0;i<n;++i){
@@ -112,6 +113,63 @@ API int64_t rp_depth(const double* vertices,const int64_t* indices,int64_t n,dou
  }catch(...){return -1;}
 }
 
+#include "cpu_alpha219.h"
+#include "cpu_alpha_intervals219.h"
+API int64_t rp_depth_alpha(const double* vertices,const int64_t* indices,int64_t n,double* depth,double* planes,void* owners,int owner_bytes,int64_t mesh_index,int w,int h,int ortho,double span,double focal,double nearz,double farz,const rpalpha::Scene* alpha) noexcept {
+ try {
+    struct Tri{double ax,ay,bx,by,cx,cy,z[3],den,px,py,pc;int x0,y0,x1,y1;double uv[3][2];int32_t mask;uint8_t wrap;};
+    std::vector<Tri> triangles;triangles.reserve(n);const int tile=64,tw=(w+tile-1)/tile,th=(h+tile-1)/tile;
+    std::vector<std::vector<int64_t>> bins(tw*th);int64_t count=0;
+    for(int64_t t=0;t<n;++t){
+      int32_t row=alpha->lookup[t];double a[8][5]{},b[8][5]{};double (*first)[5]=a,(*second)[5]=b;
+      for(int i=0;i<3;++i)for(int c=0;c<3;++c)first[i][c]=vertices[indices[t*3+i]*3+c];if(row>=0)for(int i=0;i<3;++i)for(int c=0;c<2;++c)first[i][3+c]=alpha->uv[row*6+i*2+c];int size=3;
+      bool inside=true;for(int i=0;i<3;++i)inside&=first[i][2]>=nearz&&first[i][2]<=farz;
+      if(!inside)for(int clip=0;clip<2;++clip){double plane=clip==0?nearz:farz,sign=clip==0?1.:-1.;int out=0;if(!size)break;
+        int ai=size-1;bool ina=sign*(first[ai][2]-plane)>=0;
+        for(int bi=0;bi<size;++bi){bool inb=sign*(first[bi][2]-plane)>=0;
+          if(ina!=inb){double f=(plane-first[ai][2])/(first[bi][2]-first[ai][2]);for(int c=0;c<5;++c)second[out][c]=first[ai][c]+(first[bi][c]-first[ai][c])*f;++out;}
+          if(inb){for(int c=0;c<5;++c)second[out][c]=first[bi][c];++out;}ai=bi;ina=inb;
+        }std::swap(first,second);size=out;
+      }
+      for(int fan=1;fan<size-1;++fan){++count;Tri tr{};tr.mask=row<0?-1:alpha->masks[row];tr.wrap=row<0?0:alpha->wrap[row];double xy[3][2];
+        for(int i=0;i<3;++i){int q=i==0?0:fan+i-1;tr.z[i]=first[q][2];tr.uv[i][0]=first[q][3];tr.uv[i][1]=first[q][4];double f=ortho?w/span:focal/tr.z[i];xy[i][0]=w/2.+first[q][0]*f;xy[i][1]=h/2.-first[q][1]*f;}
+        tr.ax=xy[0][0];tr.ay=xy[0][1];tr.bx=xy[1][0];tr.by=xy[1][1];tr.cx=xy[2][0];tr.cy=xy[2][1];
+        if(!(std::isfinite(tr.ax)&&std::isfinite(tr.ay)&&std::isfinite(tr.bx)&&std::isfinite(tr.by)&&std::isfinite(tr.cx)&&std::isfinite(tr.cy)))continue;
+        double x0=std::max(std::floor(std::min({tr.ax,tr.bx,tr.cx})),0.),x1=std::min(std::ceil(std::max({tr.ax,tr.bx,tr.cx})),double(w-1));
+        double y0=std::max(std::floor(std::min({tr.ay,tr.by,tr.cy})),0.),y1=std::min(std::ceil(std::max({tr.ay,tr.by,tr.cy})),double(h-1));
+        if(x0>x1||y0>y1)continue;tr.x0=int(x0);tr.x1=int(x1);tr.y0=int(y0);tr.y1=int(y1);
+        tr.den=(tr.by-tr.cy)*(tr.ax-tr.cx)+(tr.cx-tr.bx)*(tr.ay-tr.cy);if(std::abs(tr.den)<1e-12)continue;
+        double va=ortho?tr.z[0]:1./tr.z[0],vb=ortho?tr.z[1]:1./tr.z[1],vc=ortho?tr.z[2]:1./tr.z[2];
+        tr.px=((va-vc)*(tr.by-tr.cy)+(vb-vc)*(tr.cy-tr.ay))/tr.den;
+        tr.py=((va-vc)*(tr.cx-tr.bx)+(vb-vc)*(tr.ax-tr.cx))/tr.den;tr.pc=vc-tr.px*tr.cx-tr.py*tr.cy;
+        int64_t id=triangles.size();triangles.push_back(tr);
+        for(int by=tr.y0/tile;by<=tr.y1/tile;++by)for(int bx=tr.x0/tile;bx<=tr.x1/tile;++bx)bins[by*tw+bx].push_back(id);
+      }
+    }
+    std::atomic<int> next{0};auto run=[&](){for(;;){int bin=next.fetch_add(1,std::memory_order_relaxed);if(bin>=int(bins.size()))break;
+      int ox=(bin%tw)*tile,oy=(bin/tw)*tile;
+      for(auto id:bins[bin]){const Tri& t=triangles[id];int x0=std::max(t.x0,ox),x1=std::min(t.x1,ox+tile-1),y0=std::max(t.y0,oy),y1=std::min(t.y1,oy+tile-1);
+        for(int y=y0;y<=y1;++y)for(int x=x0;x<=x1;++x){double xx=x+.5,yy=y+.5;
+          double u=((t.by-t.cy)*(xx-t.cx)+(t.cx-t.bx)*(yy-t.cy))/t.den;
+          double v=((t.cy-t.ay)*(xx-t.cx)+(t.ax-t.cx)*(yy-t.cy))/t.den;double k=1-u-v;
+          if(u< -1e-8||v< -1e-8||k< -1e-8)continue;double z;
+          if(ortho)z=u*t.z[0]+v*t.z[1]+k*t.z[2];else{double inv=u/t.z[0]+v/t.z[1]+k/t.z[2];if(inv<=0)continue;z=1./inv;}
+          int64_t p=int64_t(y)*w+x;if(z<depth[p]){
+          if(t.mask>=0){double aa=ortho?u:u*z/t.z[0],bb=ortho?v:v*z/t.z[1],cc=ortho?k:k*z/t.z[2];
+           if(!rpalpha::contains(alpha->regions[t.mask],aa*t.uv[0][0]+bb*t.uv[1][0]+cc*t.uv[2][0],aa*t.uv[0][1]+bb*t.uv[1][1]+cc*t.uv[2][1],t.wrap!=0))continue;}
+          depth[p]=z;planes[p*3]=t.px;planes[p*3+1]=t.py;planes[p*3+2]=t.pc;if(owner_bytes==4)static_cast<int32_t*>(owners)[p]=int32_t(mesh_index);else if(owner_bytes==8)static_cast<int64_t*>(owners)[p]=mesh_index;}
+        }
+      }
+    }};
+    unsigned workers=n>=30000?std::min(8u,std::max(1u,std::thread::hardware_concurrency())):1;
+    std::vector<std::thread> threads;try{for(unsigned i=1;i<workers;++i)threads.emplace_back(run);}catch(...){for(auto& thread:threads)thread.join();throw;}run();for(auto& thread:threads)thread.join();return count;
+ }catch(...){return -1;}
+}
+
 #include "cpu_intersections.h"
 
 #include "cpu_visibility.h"
+
+API void rp_alpha_visible(const double* origins,const double* directions,const double* depths,int64_t n,double nearz,const rpvis::Context* context,uint8_t* visible) noexcept {
+ for(int64_t i=0;i<n;++i)visible[i]=!rpvis::occluded(origins+i*3,directions+i*3,nearz,depths[i],*context);
+}

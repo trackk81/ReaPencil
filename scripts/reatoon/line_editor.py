@@ -243,6 +243,7 @@ def show():
 def close():
     global _rows, _window, _list, _selected_line, _aux_refresh, _name_job
     _release_pin()
+    if cmds.window('reaPencilSpecificBrushEditor',exists=True):cmds.deleteUI('reaPencilSpecificBrushEditor')
     if _name_job is not None:
         if cmds.scriptJob(exists=_name_job):cmds.scriptJob(kill=_name_job)
         _name_job=None
@@ -321,7 +322,6 @@ def _set_changed(ctx):
     visible = cmds.columnLayout(adjustableColumn=True)
     _feature_fields(node, values)
     _brush_fields(node, values)
-    _specific_brush_fields(node,values,False,lambda:_set_changed(ctx))
     cmds.setParent(tabs)
     hidden = cmds.columnLayout(adjustableColumn=True)
     _field(node, 'hidden_lines', 'Draw hidden lines', values)
@@ -337,7 +337,6 @@ def _set_changed(ctx):
     cmds.checkBox(label=tr('Independent hidden settings (CPU)'),value=bool(values.get('hidden_style')),changeCommand=lambda v:_safe(independent,v))
     if values.get('hidden_style'):
         _hidden_fields(node,values)
-        _specific_brush_fields(node,values,True,lambda:_set_changed(ctx))
     cmds.text(label=tr('Independent filters and per-type brushes apply to CPU rendering. Viewport previews remain approximate.'),align='left',wordWrap=True,height=36)
     cmds.setParent(tabs)
     detail = cmds.columnLayout(adjustableColumn=True)
@@ -408,47 +407,14 @@ def _nested_field(node,hidden,feature,key,label,value):
 
 
 def _hidden_fields(node,values):
+    from . import brush_ui
     from .brush_channels import BRUSH_KEYS
     hidden=dict(values);hidden.update({k:maya_scene.DEFAULT_SETTINGS[k] for k in BRUSH_KEYS})
-    hidden.update(line_color=values['hidden_color'],line_width=values['line_width']);hidden.update(values['hidden_style'])
-    frame=cmds.frameLayout(label=tr('Hidden filters and brush (CPU)'),collapsable=True,collapse=False)
-    cmds.columnLayout(adjustableColumn=True)
-    for key,label in [('outline','Outline'),('open_edges','Open edges'),('hard_edges','Hard edges'),('crease','Crease'),
-                      ('material_boundaries','Material boundaries'),('wireframe','All polygon edges'),
-                      ('selected_edges','Stored selected edges'),('intersections','Object intersections'),('self_intersections','Self intersections'),
-                      ('crease_angle','Normal angle minimum'),('crease_angle_max','Normal angle maximum'),
-                      ('line_color','Line color'),('line_width','Line width'),('line_opacity','Brush opacity (CPU)'),('blend_mode','Blend mode (CPU)'),('dash_length','Dash length'),('dash_gap','Dash gap (-1 = length)')]:
-        _nested_field(node,True,None,key,label,hidden[key])
-    _nested_profile_fields(node,True,None)
-    cmds.button(label=tr('Hidden depth reduction (CPU)'),command=lambda *_:_edit_reduction(node,True))
-    cmds.setParent(frame);cmds.setParent('..')
+    hidden.update(line_color=values['hidden_color'],line_width=values['line_width'],feature_brushes={})
+    hidden.update(values['hidden_style'])
+    brush_ui.edge_fields(node,hidden,True)
+    brush_ui.brush_fields(node,hidden,True)
 
-
-def _specific_brush_fields(node,values,hidden,refresh):
-    base=dict(values,line_color=values['hidden_color']) if hidden else dict(values)
-    if hidden:
-        base['feature_brushes']={}
-        base.update(values.get('hidden_style',{}))
-    current=base.get('feature_brushes',{})
-    frame=cmds.frameLayout(label=tr('Per-type brushes (CPU)'),collapsable=True,collapse=True)
-    cmds.columnLayout(adjustableColumn=True)
-    for feature,label in [('outline','Outline'),('intersection','Object intersections'),('hard','Hard edges'),
-                          ('material','Material boundaries'),('selected','Stored selected edges'),('crease','Crease'),('wireframe','All polygon edges')]:
-        def toggle(enabled,f=feature):
-            settings=graph.get_settings(node);parent=settings.setdefault('hidden_style',{}) if hidden else settings
-            brushes=parent.setdefault('feature_brushes',{})
-            if enabled:brushes[f]=dict(line_color=base['line_color'],line_width=base['line_width'])
-            else:brushes.pop(f,None)
-            graph.set_settings(node,settings);refresh()
-        cmds.checkBox(label=tr(label),value=feature in current,changeCommand=lambda v,fn=toggle:_safe(fn,v))
-        if feature in current:
-            from .brush_channels import BRUSH_KEYS
-            brush=dict(base);brush.update({k:maya_scene.DEFAULT_SETTINGS[k] for k in BRUSH_KEYS})
-            brush.update(line_color=base['line_color'],line_width=base['line_width']);brush.update(current[feature])
-            for key,label in [('line_color','Line color'),('line_width','Line width'),('line_opacity','Brush opacity (CPU)'),('blend_mode','Blend mode (CPU)'),('dash_length','Dash length'),('dash_gap','Dash gap (-1 = length)')]:
-                _nested_field(node,hidden,feature,key,label,brush[key])
-            _nested_profile_fields(node,hidden,feature)
-    cmds.setParent(frame);cmds.setParent('..')
 
 
 def _field(node, key, label, values):
@@ -471,30 +437,14 @@ def _field(node, key, label, values):
 
 
 def _feature_fields(node, values):
-    frame = cmds.frameLayout(label=tr('Line Types'), collapsable=True, collapse=False)
-    cmds.columnLayout(adjustableColumn=True)
-    for key, label in [('outline','Outline'),('open_edges','Open edges'),('intersections','Object intersections'),
-                       ('self_intersections','Self intersections'),('hard_edges','Hard edges'),
-                       ('material_boundaries','Material boundaries'),('selected_edges','Stored selected edges'),
-                       ('crease','Crease'),('wireframe','All polygon edges'),('merge_groups','Use merge groups')]:
-        _field(node,key,label,values)
-    _field(node,'crease_angle','Normal angle minimum',values)
-    _field(node,'crease_angle_max','Normal angle maximum',values)
-    cmds.setParent(frame)
-    cmds.setParent('..')
+    from . import brush_ui
+    return brush_ui.edge_fields(node,values)
 
 
 def _brush_fields(node, values):
-    frame = cmds.frameLayout(label=tr('Brush'), collapsable=True, collapse=False)
-    cmds.columnLayout(adjustableColumn=True)
-    _field(node,'line_color','Color',values)
-    _field(node,'line_opacity','Brush opacity (CPU)',values)
-    _field(node,'blend_mode','Blend mode (CPU)',values)
-    _field(node,'relative_line_size','Relative size (640 px width)',values)
-    _field(node,'line_width','Size (pixels)',values)
-    _field(node,'brush_size_scale','Width multiplier (CPU)',values)
-    cmds.setParent(frame)
-    cmds.setParent('..')
+    from . import brush_ui
+    return brush_ui.brush_fields(node,values)
+
 
 
 def _rename_set(ctx, node, value):

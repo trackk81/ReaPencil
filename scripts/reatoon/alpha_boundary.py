@@ -85,6 +85,20 @@ def configuration(shape,dependency_node=None):
     return dict(data,sources=current) if current else None
 
 
+def render_configuration(shape, dependency_node=None):
+    """CPU material cutouts without scene edits; explicit overrides win."""
+    exists=(dependency_node.hasAttribute(ATTRIBUTE) if dependency_node is not None else
+            cmds.attributeQuery(ATTRIBUTE,node=shape,exists=True))
+    if exists:return configuration(shape,dependency_node)
+    found=material_sources(shape)
+    if not found:return None
+    for source in found.values():
+        raw=os.path.expandvars(source['path'])
+        if not os.path.isabs(raw):raw=cmds.workspace(expandName=raw)
+        source['path']=raw
+    return dict(version=1,enabled=True,threshold=.5,resolution=2048,simplify=.25,sources=found)
+
+
 def selected_meshes():
     result=[]
     for node in cmds.ls(sl=True,long=True,objectsOnly=True) or []:
@@ -166,11 +180,20 @@ def material_sources(shape):
 
 
 @lru_cache(maxsize=32)
-def _image_cells(path,modified,size,channel,invert,threshold,resolution,simplify):
+def _image_cells(path,modified,size,channel,invert,threshold,resolution,simplify,compact=False):
     from PySide6.QtGui import QImage
     from PySide6.QtCore import Qt
     image=QImage(path)
-    if image.isNull():raise ValueError('Cannot read alpha texture: '+path)
+    if image.isNull():
+        # Foliage DDS files can be readable by Maya but absent from Qt's codecs.
+        # MImage starts at the lower row; match QImage's top-to-bottom ordering.
+        import ctypes
+        decoded=om.MImage()
+        try:decoded.readFromFile(path)
+        except RuntimeError as error:raise ValueError('Cannot read alpha texture: '+path) from error
+        w,h=decoded.getSize()
+        pixels=np.ctypeslib.as_array(ctypes.cast(int(decoded.pixels()),ctypes.POINTER(ctypes.c_ubyte)),shape=(h,w,4))
+        image=QImage(pixels[::-1].copy().tobytes(),w,h,w*4,QImage.Format_RGBA8888).copy()
     if channel=='alpha' and not image.hasAlphaChannel():
         raise ValueError('Image has no alpha channel; choose Luminance for an opacity mask: '+path)
     if max(image.width(),image.height())>resolution:
@@ -182,15 +205,19 @@ def _image_cells(path,modified,size,channel,invert,threshold,resolution,simplify
     else:alpha=rgba[:,:,dict(red=0,green=1,blue=2,alpha=3)[channel]]
     if invert:alpha=1-alpha
     loops=geometry.contours(alpha,threshold,simplify)
-    return _triangulate_contours(loops),dict(texture_size=[image.width(),image.height()],contours=len(loops),
+    if compact:
+        from .alpha_compact import Region
+        cells=Region(loops)
+    else:cells=_triangulate_contours(loops)
+    return cells,dict(texture_size=[image.width(),image.height()],contours=len(loops),
                                             contour_vertices=sum(len(p) for p in loops))
 
 
-def _cells(source,config):
+def _cells(source,config,compact=False):
     path=os.path.abspath(os.path.expandvars(source['path']))
     stat=os.stat(path)
     return _image_cells(path,stat.st_mtime_ns,stat.st_size,source['channel'],bool(source.get('invert',False)),
-                        float(config['threshold']),int(config['resolution']),float(config['simplify']))
+                        float(config['threshold']),int(config['resolution']),float(config['simplify']),compact)
 
 
 def apply_selected(path='',channel='alpha',invert=False,threshold=.5,resolution=256,simplify=.25):
@@ -238,7 +265,7 @@ def _texture_fn(path,evaluated):
     return om.MFnMesh(source.generateSmoothMesh(owner,options)),owner
 
 
-def transform_mesh(mesh,path,evaluated,config,_cell_cache=None):
+def transform_mesh(mesh,path,evaluated,config,_cell_cache=None,_triangle_budget=None):
     fn,owner=_texture_fn(path,evaluated)
     if fn.numVertices!=len(mesh['vertices']) or fn.numPolygons!=len(mesh['faces']):
         raise ValueError('Alpha UV topology differs from evaluated mesh: '+mesh['name'])
@@ -258,13 +285,13 @@ def transform_mesh(mesh,path,evaluated,config,_cell_cache=None):
     for face in np.unique(tfaces):
         material=str(mesh['material_ids'][face]);source=sources.get('all',sources.get(material))
         if source is None:continue
-        if _cell_cache is None:cells,info=_cells(source,config)
+        if _cell_cache is None:cells,info=_cells(source,config,compact=True)
         else:
             # A viewport export uses one immutable source/config per material.
             # Scope this cache to that single transform so texture edits on a
             # later rebuild still perform the original file-stat validation.
             key=id(source)
-            if key not in _cell_cache:_cell_cache[key]=_cells(source,config)
+            if key not in _cell_cache:_cell_cache[key]=_cells(source,config,compact=True)
             cells,info=_cell_cache[key]
         face_cells[int(face)]=cells;face_sources[int(face)]=source
         if info not in stats:stats.append(info)
@@ -290,17 +317,13 @@ def transform_mesh(mesh,path,evaluated,config,_cell_cache=None):
             basis=np.stack((values[:,1]-values[:,0],values[:,2]-values[:,0]),axis=2)
             if np.any(np.abs(np.linalg.det(basis))<1e-14):
                 raise ValueError('Alpha boundary requires non-degenerate UV triangles')
-    cut=geometry.cut_mesh(mesh['vertices'],triangles,tfaces,uvs,face_cells,wrap=next(iter(wrapping),True))
+    from .alpha_compact import cut_mesh
+    cut=cut_mesh(mesh['vertices'],triangles,tfaces,uvs,face_cells,wrap=next(iter(wrapping),True),triangle_budget=_triangle_budget)
     mapping=cut.pop('source_faces');bind=dict(ids=cut.pop('bind_ids'),weights=cut.pop('bind_weights'),
                                             source_vertex_count=len(mesh['vertices']))
     # Descendants of authored hard/selected edges survive trimming.
-    edge_map={}
-    for face in cut['faces']:
-        for a,b in zip(face,face[1:]+face[:1]):
-            support=set(int(i) for vi in (a,b) for i,w in zip(bind['ids'][vi],bind['weights'][vi]) if abs(w)>1e-9)
-            if len(support)==2:
-                pair=tuple(sorted(support))
-                edge_map.setdefault(pair,set()).add(tuple(sorted((a,b))))
+    from .alpha_compact import source_edge_map
+    edge_map=source_edge_map(cut['triangles'],bind['ids'],bind['weights'])
     def remap(pairs):return [list(edge) for p in pairs for edge in edge_map.get(tuple(sorted(map(int,p))),())]
     base=np.asarray(mesh.get('base_face_ids',np.arange(len(mesh['faces']))),np.int32)
     mesh['base_face_ids']=base[mapping];mesh['material_ids']=np.asarray(mesh['material_ids'])[mapping].tolist()

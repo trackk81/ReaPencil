@@ -24,7 +24,7 @@ def _library():
         fn=getattr(lib,name);fn.argtypes=args;fn.restype=result
     return lib
 
-def triangulate(loops):
+def triangulate(loops, winding_rule=100130, accurate_intersections=False):
     if not loops:return np.empty((0,3,2),np.float64)
     arrays=[np.asarray(p,np.float64).reshape(-1,2) for p in loops]
     if any(len(p)<3 or not np.isfinite(p).all() for p in arrays):raise ValueError('Invalid alpha contours')
@@ -34,7 +34,14 @@ def triangulate(loops):
         if mode!=4:errors.append('Non-triangle primitive: %s'%mode)
     def vertex(data):indices.append(int(data)-1)
     def combine(xyz,data,weights,result):
-        points.append([xyz[0],xyz[1]]);result[0]=len(points)
+        point=[xyz[0],xyz[1]]
+        if accurate_intersections and all(data[i] for i in range(4)):
+            a,b,c,d=(np.asarray(points[int(data[i])-1],np.float64) for i in range(4))
+            ab=b-a;cd=d-c;den=ab[0]*cd[1]-ab[1]*cd[0]
+            if abs(den)>1e-20:
+                ac=c-a;t=(ac[0]*cd[1]-ac[1]*cd[0])/den
+                point=(a+t*ab).tolist()
+        points.append(point);result[0]=len(points)
     callbacks={100100:callback(None,C.c_uint)(begin),
         100101:callback(None,C.c_void_p)(vertex),
         100104:callback(None,C.c_ubyte)(lambda flag:None),
@@ -44,7 +51,7 @@ def triangulate(loops):
     if not tess:raise MemoryError('Cannot allocate alpha tessellator')
     try:
         for kind,fn in callbacks.items():lib.gluTessCallback(tess,kind,C.cast(fn,C.c_void_p))
-        lib.gluTessProperty(tess,100140,100130.) # GLU_TESS_WINDING_RULE / ODD
+        lib.gluTessProperty(tess,100140,float(winding_rule)) # ODD, or signed intersection
         lib.gluTessNormal(tess,0.,0.,1.)
         lib.gluTessBeginPolygon(tess,None);offset=0
         for loop in arrays:

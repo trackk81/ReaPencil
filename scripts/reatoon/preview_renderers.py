@@ -5,10 +5,39 @@ NAME='reaPencilPreview'
 _override=None
 _pending=False
 
+class AlphaSurface(render.MSceneRender):
+    def renderFilterOverride(self):return self.kRenderShadedItems
+
+class AlphaOverlay(render.MSceneRender):
+    def preRender(self):
+        from . import viewport_alpha_gpu
+        if viewport_alpha_gpu._library is not None:viewport_alpha_gpu._library.rt_alpha_phase(0)
+    def renderFilterOverride(self):return self.kRenderNonShadedItems
+    def clearOperation(self):
+        clear=super().clearOperation()
+        clear.setMask(render.MClearOperation.kClearNone)
+        return clear
+
+class AlphaDepth(AlphaOverlay):
+    def objectSetOverride(self):
+        from maya.api import OpenMaya as om
+        from . import viewport
+        selected=om.MSelectionList()
+        for node in cmds.ls(type=viewport.NODE_NAME,long=True) or []:selected.add(node)
+        return selected
+    def preRender(self):
+        from . import viewport_alpha_gpu
+        if viewport_alpha_gpu._library is not None:viewport_alpha_gpu._library.rt_alpha_phase(1)
+    def postRender(self):
+        from . import viewport_alpha_gpu
+        if viewport_alpha_gpu._library is not None:viewport_alpha_gpu._library.rt_alpha_phase(0)
+
 class Preview(render.MRenderOverride):
     def __init__(self):
         super().__init__(NAME)
         self.operations=[render.MSceneRender('ReaPencil_scene'),render.MHUDRender(),render.MPresentTarget('ReaPencil_present')]
+        self.standard=list(self.operations)
+        self.alpha=[AlphaSurface('ReaPencil_alpha_surface'),AlphaDepth('ReaPencil_alpha_depth'),AlphaOverlay('ReaPencil_alpha_overlay')]+self.standard[1:]
         self.index=0
     def uiName(self):return 'ReaPencil Preview'
     def supportedDrawAPIs(self):return render.MRenderer.kOpenGLCoreProfile
@@ -19,6 +48,10 @@ class Preview(render.MRenderOverride):
         global _pending
         from . import fast_targets,viewport
         if fast_targets._watching:fast_targets._watching=False;viewport._scene_changed()
+        live=viewport._gpu_scene
+        # Transparent surfaces otherwise cover the inner half of their contour.
+        # Keep the established single scene pass for non-alpha previews.
+        self.operations=self.alpha if live and any(m.get('_gpu_alpha',{}).get('groups') for m in live.scene['meshes']) else self.standard
         clear=self.operations[0].clearOperation()
         clear.setClearColor(cmds.displayRGBColor('backgroundTop' if cmds.displayPref(q=True,displayGradient=True) else 'background',q=True)+[1.])
         clear.setClearColor2(cmds.displayRGBColor('backgroundBottom',q=True)+[1.])

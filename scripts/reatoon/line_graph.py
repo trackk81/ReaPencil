@@ -149,12 +149,64 @@ def create_line_set(line, name="revToonLineSet", overrides=None, position=0):
 
 
 def get_settings(node):
-    return json.loads(cmds.getAttr(node + ".overrides") or "{}")
+    values=json.loads(cmds.getAttr(node + ".overrides") or "{}")
+    # DG message connections are remapped by Maya for imported/referenced scenes.
+    # UUID/name JSON remains a fallback for candidates saved before these links.
+    for attr,descriptor in _brush_map_slots(values):
+        if not cmds.attributeQuery(attr,node=node,exists=True):continue
+        plug=node+'.'+attr
+        if cmds.getAttr(plug,type=True)!='message':raise ValueError('Brush map binding must be a message: '+plug)
+        sources=cmds.listConnections(plug,source=True,destination=False) or []
+        if len(sources)==1 and cmds.attributeQuery('outColor',node=sources[0],exists=True):
+            descriptor['node']=sources[0]
+            descriptor['uuid']=(cmds.ls(sources[0],uuid=True) or [''])[0]
+        elif descriptor.get('uuid') or descriptor.get('node'):
+            # Never fall back to an original-scene texture after the copied
+            # connection is deleted. Keep its old name for the error message.
+            descriptor['uuid']='unconnected:'+plug
+    return values
+
+
+def _brush_map_slots(values):
+    for hidden in (False,True):
+        parent=values.get('hidden_style',{}) if hidden else values
+        prefix='reaBrushMap_'+('hidden' if hidden else 'visible')
+        for feature,brush in [('',parent),*parent.get('feature_brushes',{}).items()]:
+            for channel,descriptor in brush.get('brush_maps',{}).items():
+                yield prefix+('_'+feature if feature else '')+'_'+channel,descriptor
+
+
+def _bind_brush_maps(node,values):
+    from .maya_brush_maps import active,resolve_node
+    planned={}
+    for attr,descriptor in _brush_map_slots(values):
+        texture=None
+        if descriptor.get('uuid') or descriptor.get('node'):
+            try:texture=resolve_node(descriptor,cmds)
+            except ValueError:
+                if active(descriptor):raise
+        elif active(descriptor):
+            raise ValueError('Connect a texture before enabling the brush map')
+        planned[attr]=texture
+        if cmds.attributeQuery(attr,node=node,exists=True) and cmds.getAttr(node+'.'+attr,type=True)!='message':
+            raise ValueError('Brush map binding must be a message: '+node+'.'+attr)
+    old=cmds.listAttr(node,userDefined=True,string='reaBrushMap_*') or []
+    for attr in set(old)|set(planned):
+        plug=node+'.'+attr;texture=planned.get(attr)
+        if not cmds.attributeQuery(attr,node=node,exists=True):
+            if texture is None:continue
+            cmds.addAttr(node,longName=attr,attributeType='message',hidden=True)
+        if cmds.getAttr(plug,type=True)!='message':continue
+        desired=texture+'.message' if texture else None
+        for source in cmds.listConnections(plug,source=True,destination=False,plugs=True) or []:
+            if source!=desired:cmds.disconnectAttr(source,plug)
+        if desired and not cmds.isConnected(desired,plug):cmds.connectAttr(desired,plug,force=True)
 
 
 def set_settings(node, settings):
     from .maya_scene import validate_settings
     values = validate_settings(settings, partial=True)
+    _bind_brush_maps(node,values)
     cmds.setAttr(node + ".overrides", json.dumps(values, sort_keys=True), type="string")
 
 

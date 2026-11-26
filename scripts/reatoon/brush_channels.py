@@ -4,7 +4,7 @@ import numpy as np
 FEATURES=('wireframe','open','outline','crease','material','hard','selected')
 KEYS=('wireframe','open_edges','outline','crease','material_boundaries','hard_edges','selected_edges')
 PRIORITY=('outline','open','intersection','hard','material','selected','crease','wireframe')
-BRUSH_KEYS={'line_image','brush_image','brush_stamp_spacing','brush_roughness','brush_density','brush_width_scale','line_pattern','brush_preset','pattern_period','pattern_amplitude','line_color','line_width','brush_size_scale','dash_length','dash_gap','line_opacity','blend_mode','brush_key','width_profile','alpha_profile','profile_direction','profile_split_angle','profile_loop_direction','pencil_profile_width','alpha_depth_reduction','width_depth_reduction','alpha_reduction_origin','width_reduction_origin'}
+BRUSH_KEYS={'brush_maps','line_image','brush_image','brush_stamp_spacing','brush_roughness','brush_density','brush_width_scale','line_pattern','brush_preset','pattern_period','pattern_amplitude','line_color','line_width','brush_size_scale','dash_length','dash_gap','line_opacity','blend_mode','brush_key','width_profile','alpha_profile','profile_direction','profile_split_angle','profile_loop_direction','pencil_profile_width','alpha_depth_reduction','width_depth_reduction','alpha_reduction_origin','width_reduction_origin'}
 FILTER_KEYS=set(KEYS)|{'intersections','self_intersections','crease_angle','crease_angle_max','merge_groups'}
 
 def validate_nested(value,validate,hidden=False):
@@ -30,7 +30,7 @@ def prepare(raw,resolve):
         specifics=raw.get('feature_brushes',{})
         if hidden:
             if raw.get('hidden_style'):
-                values.update(width_profile=[],alpha_profile=[],alpha_depth_reduction=[],width_depth_reduction=[],alpha_reduction_origin=[],width_reduction_origin=[],pencil_profile_width=True,profile_direction=-30.,profile_split_angle=90.,profile_loop_direction=0,brush_size_scale=1.,line_opacity=1.,blend_mode=0,brush_key="",dash_length=0.,dash_gap=-1.,taper=0.,width_variation=0.,distance_reduction=0.)
+                values.update(brush_maps={},width_profile=[],alpha_profile=[],alpha_depth_reduction=[],width_depth_reduction=[],alpha_reduction_origin=[],width_reduction_origin=[],pencil_profile_width=True,profile_direction=-30.,profile_split_angle=90.,profile_loop_direction=0,brush_size_scale=1.,line_opacity=1.,blend_mode=0,brush_key="",dash_length=0.,dash_gap=-1.,taper=0.,width_variation=0.,distance_reduction=0.)
             values['line_color']=raw.get('hidden_color',[.5,.5,.6])
             values.update(raw.get('hidden_style',{}))
             specifics=values.pop('feature_brushes',{})
@@ -40,7 +40,7 @@ def prepare(raw,resolve):
         default=resolve(values)
         brushes={}
         for name,brush in specifics.items():
-            selected=dict(values,width_profile=[],alpha_profile=[],pencil_profile_width=True,profile_direction=-30.,profile_split_angle=90.,profile_loop_direction=0,brush_size_scale=1.,line_opacity=1.,blend_mode=0,brush_key="",dash_length=0.,dash_gap=-1.,taper=0.,width_variation=0.,distance_reduction=0.)
+            selected=dict(values,brush_maps={},width_profile=[],alpha_profile=[],pencil_profile_width=True,profile_direction=-30.,profile_split_angle=90.,profile_loop_direction=0,brush_size_scale=1.,line_opacity=1.,blend_mode=0,brush_key="",dash_length=0.,dash_gap=-1.,taper=0.,width_variation=0.,distance_reduction=0.)
             selected.update(brush);selected['hidden_color']=selected['line_color']
             brushes[name]=resolve(selected)
         channels.append(dict(settings=default,brushes=brushes))

@@ -1,7 +1,8 @@
 // Strict CPU equivalents of the conservative visibility and capsule kernels.
+#include "cpu_alpha219.h"
 namespace rpvis {
 constexpr double epsilon=std::numeric_limits<double>::epsilon();
-struct Context {const int64_t *roots,*child,*ranges,*order;const double *low,*high,*tri;int64_t nr;};
+struct Context {const int64_t *roots,*child,*ranges,*order;const double *low,*high,*tri;int64_t nr;const rpalpha::Scene* alpha;};
 bool box(const double* o,const double* d,const double* low,const double* high,double nearz,double farz){
  for(int a=0;a<3;++a){if(d[a]==0){if(o[a]<low[a]||o[a]>high[a])return false;}
  else{double x=(low[a]-o[a])/d[a],y=(high[a]-o[a])/d[a];nearz=std::max(nearz,std::min(x,y));farz=std::min(farz,std::max(x,y));if(nearz>farz)return false;}}return true;
@@ -21,7 +22,7 @@ bool occluded(const double* o,const double* d,double nearz,double limit,const Co
  dp+=std::abs(ex)*(std::abs(dy*fz)+std::abs(dz*fy));dp+=std::abs(ey)*(std::abs(dz*fx)+std::abs(dx*fz));dp+=std::abs(ez)*(std::abs(dx*fy)+std::abs(dy*fx));
  np+=std::abs(fx)*(std::abs(sy*ez)+std::abs(sz*ey));np+=std::abs(fy)*(std::abs(sz*ex)+std::abs(sx*ez));np+=std::abs(fz)*(std::abs(sx*ey)+std::abs(sy*ex));
  double de=64*epsilon*dp,den=std::abs(det)-de;if(den<=0)continue;double error=(64*epsilon*np+std::abs(distance)*de)/den;
- if(nearz<=distance&&distance+error<farz)return true;
+ if(nearz<=distance&&distance+error<farz&&rpalpha::opaque(c.alpha,c.order[slot],u,v))return true;
  }}}return false;
 }
 void stroke(float* layer,int w,int h,int64_t stride,double ax,double ay,double bx,double by,double width,const double* color){

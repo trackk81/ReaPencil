@@ -5,9 +5,28 @@ execute its complete reference stage. It never silently drops a feature.
 """
 import numpy as np
 
+_BATCH_SIZE=524288
+
+
+def _batches(parts):
+    """Fill bounded batches across part boundaries without reordering strokes."""
+    from .packed_segments import PackedSegments
+    chunk=PackedSegments()
+    for part in parts:
+        first=0
+        while first<part['count']:
+            last=min(part['count'],first+_BATCH_SIZE-len(chunk))
+            p=dict(part,count=last-first)
+            for key in ('records','points','flags','vertex_ids','profile_u'):
+                if key in p:p[key]=p[key].slice_view(first,last) if key=='points' and hasattr(p[key],'slice_view') else p[key][first:last]
+            chunk.parts.append(p);chunk.count+=p['count'];first=last
+            if len(chunk)==_BATCH_SIZE:
+                yield chunk;chunk=PackedSegments()
+    if len(chunk):yield chunk
+
 
 def render_segments(segments,camera,depth,depth_planes,visible,hidden,ss,
-                    group_image=None,elements=None,collect_vectors=True,visibility=None):
+                    group_image=None,elements=None,collect_vectors=True,visibility=None,progress=None):
     if group_image is not None or elements:return None
     packed=hasattr(segments,'arrays')
     styles=segments.styles() if packed else {id(s['settings']):s['settings'] for s in segments}.values()
@@ -15,6 +34,23 @@ def render_segments(segments,camera,depth,depth_planes,visible,hidden,ss,
         if (style.get('hidden_lines',False) and style.get('_visibility_mode')!=-1) or style.get('width_profile') or style.get('alpha_profile'):return None
         if any(float(style.get(k,0))!=0 for k in
                ('dash_length','distance_reduction','width_variation','taper')):return None
+    if packed and len(segments)>_BATCH_SIZE:
+        # Keep the same compositing order and shared depth/visibility buffers,
+        # without duplicating an entire forest's contour coordinates.
+        from .packed_segments import PackedSegments
+        total=dict(vectors=[],visible_segments=0,hidden_segments=0,classified_edges=0,
+                   backend='native-cpu-segments',visibility_refinement=dict(checked_samples=0,hidden_samples=0))
+        completed=0
+        count=len(segments)
+        for chunk in _batches(segments.parts):
+            batch=render_segments(chunk,camera,depth,depth_planes,visible,hidden,ss,
+                                  collect_vectors=collect_vectors,visibility=visibility)
+            completed+=len(chunk)
+            if progress:progress('strokes',completed,count)
+            total['backend']=batch['backend'];total['vectors'].extend(batch['vectors'])
+            for key in ('visible_segments','hidden_segments','classified_edges'):total[key]+=batch[key]
+            for key in ('checked_samples','hidden_samples'):total['visibility_refinement'][key]+=batch['visibility_refinement'][key]
+        return total
     from .native_cpu import library,segments as render
     backend="native-cpu-segments"
     if library() is None:
@@ -50,7 +86,8 @@ def render_segments(segments,camera,depth,depth_planes,visible,hidden,ss,
         else:
             outline = np.asarray(['outline' in row['features'] for row in segments])
             enabled |= np.where(outline, 4, 0).astype(np.uint8)
-    points=(points-np.asarray(camera['eye'])) @ np.asarray(camera['basis']).T
+    points-=np.asarray(camera['eye'])
+    points=(points.reshape(-1,3) @ np.asarray(camera['basis']).T).reshape(count,2,3)
     visibility_stats=np.zeros(2,np.int64)
     channel_hidden=any(s.get('_visibility_mode')==-1 for s in (segments.styles() if packed else [r['settings'] for r in segments]))
     modes=np.empty(0,np.int8)
@@ -78,12 +115,11 @@ def render_segments(segments,camera,depth,depth_planes,visible,hidden,ss,
                        int(ss),bool(camera['ortho']),float(camera['span']),float(camera['focal']),
                        float(camera['near']),float(camera['far']),visibility,
                        np.asarray(camera['eye']),np.linalg.inv(camera['basis']).T,visibility_stats,
-                       **({'raw_rows':True} if raw_rows else {}))
+                       **({'count_only':True} if raw_rows else {}))
         if raw_rows:
-            # PNG-only renders need the count, not hundreds of thousands of
-            # Python vector tuples. The native records and pixels are intact.
-            indices=records[:,0].astype(np.intp)
-            visible_count=int(np.count_nonzero(~only[indices]))
+            # PNG-only output counts visible runs without allocating or sorting
+            # vector coordinates. Rasterization and visibility remain identical.
+            visible_count=records
             return dict(vectors=[],visible_segments=visible_count,hidden_segments=0,
                         classified_edges=count,backend=backend,
                         visibility_refinement=dict(checked_samples=int(visibility_stats[0]),hidden_samples=int(visibility_stats[1])))

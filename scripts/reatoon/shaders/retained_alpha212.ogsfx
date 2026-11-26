@@ -1,0 +1,58 @@
+#version 410
+// Texture-space boundary, evaluated at the current viewport pixel footprint.
+uniform mat4 viewProjection : WorldViewProjection;
+uniform mat4 worldView : WorldView;
+uniform vec2 viewportSize : ViewportPixelSize;
+uniform vec4 lineColor = {0,0,0,1};
+uniform float lineWidth = 1.5;
+uniform float lineOpacity = 1.0;
+uniform vec4 widthDepthReduction = {0,0,1,1};
+uniform vec4 alphaDepthReduction = {0,0,1,1};
+uniform bool alphaDepthOnly=false;
+uniform int sceneDepthSamples=1;
+uniform bool hasSceneDepth = false;
+uniform bool scopeEnabled = false;
+uniform texture2D scopeTexture;
+uniform sampler2D scopeSampler = sampler_state { Texture = <scopeTexture>; TEXTURE_MIN_FILTER = NEAREST; TEXTURE_MAG_FILTER = NEAREST; TEXTURE_WRAP_S = CLAMP_TO_EDGE; TEXTURE_WRAP_T = CLAMP_TO_EDGE; };
+uniform texture2D sceneDepthTexture;
+uniform sampler2D sceneDepthSampler = sampler_state { Texture = <sceneDepthTexture>; TEXTURE_MIN_FILTER = NEAREST; TEXTURE_MAG_FILTER = NEAREST; TEXTURE_WRAP_S = CLAMP_TO_EDGE; TEXTURE_WRAP_T = CLAMP_TO_EDGE; };
+uniform texture2D alphaTexture;
+uniform sampler2D alphaSampler = sampler_state { Texture = <alphaTexture>; TEXTURE_MIN_FILTER = LINEAR; TEXTURE_MAG_FILTER = LINEAR; TEXTURE_WRAP_S = REPEAT; TEXTURE_WRAP_T = REPEAT; };
+attribute APPDATA { vec3 inPosition : POSITION; vec4 normalA : TEXCOORD0; };
+attribute VERTEXDATA { vec3 worldPosition; vec2 uv; float objectId; float drawLines; };
+attribute PIXELDATA { vec4 outColor : COLOR0; };
+GLSLShader AlphaVertex {
+ void main(){gl_Position=viewProjection*vec4(inPosition,1);VS_OUT.worldPosition=inPosition;VS_OUT.uv=normalA.xy;VS_OUT.objectId=normalA.z;VS_OUT.drawLines=normalA.w;}
+}
+GLSLShader AlphaPixel {
+ void main(){
+  if(scopeEnabled){ivec2 s=textureSize(scopeSampler,0);int id=int(PS_IN.objectId+.5);if(texelFetch(scopeSampler,ivec2(id%s.x,id/s.x),0).r<.5)discard;}
+  float maskDistance=texture(alphaSampler,PS_IN.uv).r;
+  if(alphaDepthOnly){if(maskDistance<0.)discard;gl_FragDepth=gl_FragCoord.z;outColor=vec4(0);return;}
+  if(PS_IN.drawLines<.5)discard;
+  float depth=-(worldView*vec4(PS_IN.worldPosition,1)).z;
+  float width=lineWidth,opacity=lineOpacity;
+  if(widthDepthReduction.y>widthDepthReduction.x)width*=mix(widthDepthReduction.z,widthDepthReduction.w,clamp((depth-widthDepthReduction.x)/(widthDepthReduction.y-widthDepthReduction.x),0.,1.));
+  if(alphaDepthReduction.y>alphaDepthReduction.x)opacity*=mix(alphaDepthReduction.z,alphaDepthReduction.w,clamp((depth-alphaDepthReduction.x)/(alphaDepthReduction.y-alphaDepthReduction.x),0.,1.));
+  float distance=maskDistance;
+  float gradient=length(vec2(dFdx(distance),dFdy(distance)));
+  float pixelDistance=abs(distance)/max(gradient,1e-5);
+  float coverage=clamp((width+1.)*.5-pixelDistance,0.,1.);
+  if(width<=0.||coverage<=0.||opacity<=0.)discard;
+  if(hasSceneDepth){
+   ivec2 s=textureSize(sceneDepthSampler,0),p=clamp(ivec2(gl_FragCoord.xy),ivec2(0),s-1);
+   float scene=texelFetch(sceneDepthSampler,p,0).r;
+   float guard=max(2./16777215.,2.*abs(uintBitsToFloat(floatBitsToUint(gl_FragCoord.z)+1u)-gl_FragCoord.z));
+   if(sceneDepthSamples>1)guard+=.5*(abs(dFdx(gl_FragCoord.z))+abs(dFdy(gl_FragCoord.z)));
+   if(gl_FragCoord.z>scene+guard)discard;
+  }
+  gl_FragDepth=uintBitsToFloat(floatBitsToUint(gl_FragCoord.z)-1u);
+  outColor=vec4(lineColor.rgb,coverage*opacity);
+ }
+}
+technique Main {
+ pass P0 {
+  VertexShader(in APPDATA,out VERTEXDATA VS_OUT)=AlphaVertex;
+  PixelShader(in VERTEXDATA PS_IN,out PIXELDATA)=AlphaPixel;
+ }
+}

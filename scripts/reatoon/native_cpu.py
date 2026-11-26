@@ -11,7 +11,12 @@ class QueryResult(ctypes.Structure):
     _fields_=[('rows',ctypes.POINTER(ctypes.c_double)),('size',ctypes.c_int64),('counts',ctypes.c_int64*9),('code',ctypes.c_int)]
 
 class Visibility(ctypes.Structure):
-    _fields_=[(k,ctypes.c_void_p) for k in ('roots','child','ranges','order','low','high','tri')]+[('nr',ctypes.c_int64)]
+    _fields_=[(k,ctypes.c_void_p) for k in ('roots','child','ranges','order','low','high','tri')]+[('nr',ctypes.c_int64),('alpha',ctypes.c_void_p)]
+def visibility_context(visibility):
+    if visibility is None:return None
+    alpha=visibility[7] if len(visibility)>7 else None
+    return Visibility(*[visibility[i].ctypes.data for i in (0,3,4,5,1,2,6)],len(visibility[0]),ctypes.addressof(alpha.native) if alpha is not None else None)
+
 class SegmentResult(ctypes.Structure):
     _fields_=[('rows',ctypes.POINTER(ctypes.c_double)),('size',ctypes.c_int64),('checked',ctypes.c_int64),('hidden',ctypes.c_int64)]
 
@@ -20,7 +25,7 @@ def library():
     if _lib is False:return None
     if _lib is None:
         try:
-            lib=ctypes.CDLL(str(Path(__file__).resolve().parents[2]/'plug-ins/2025/reaPencilCPU111.dll'))
+            lib=ctypes.CDLL(str(Path(__file__).resolve().parents[2]/'plug-ins/2025/reaPencilCPU221.dll'))
             lib.rp_facts.argtypes=[ctypes.c_void_p,ctypes.c_void_p,ctypes.c_int64]+[ctypes.c_void_p]*6
             lib.rp_facts.restype=ctypes.c_int
             lib.rp_bvh.argtypes=[ctypes.c_void_p]*2+[ctypes.c_int64]*2+[ctypes.c_void_p]*5
@@ -29,6 +34,8 @@ def library():
             lib.rp_edges.restype=ctypes.c_int64
             lib.rp_depth.argtypes=[ctypes.c_void_p]*2+[ctypes.c_int64]+[ctypes.c_void_p]*3+[ctypes.c_int,ctypes.c_int64]+[ctypes.c_int]*3+[ctypes.c_double]*4
             lib.rp_depth.restype=ctypes.c_int64
+            lib.rp_depth_alpha.argtypes=lib.rp_depth.argtypes+[ctypes.c_void_p]
+            lib.rp_depth_alpha.restype=ctypes.c_int64
             lib.rp_query.argtypes=[ctypes.POINTER(QueryMesh),ctypes.POINTER(QueryMesh),ctypes.c_int,ctypes.c_double,ctypes.c_int64,ctypes.c_int64,ctypes.POINTER(QueryResult)]
             lib.rp_query.restype=ctypes.c_int
             lib.rp_query_free.argtypes=[ctypes.POINTER(ctypes.c_double)]
@@ -80,12 +87,14 @@ def edges(vertices,flat,counts,mids):
     normals,centers,pairs,owners,starts,counts,dot,material=arrays
     return dict(vertices=v,normals=normals,centers=centers,pairs=pairs[:n].copy(),owners=owners,starts=starts[:n].copy(),counts=counts[:n].copy(),min_dot=dot[:n].copy(),material=material[:n].astype(bool))
 
-def depth(vertices,triangles,camera,depth,planes,owners,index):
+def depth(vertices,triangles,camera,depth,planes,owners,index,alpha=None):
     lib=library()
     if lib is None:return None
-    count=lib.rp_depth(vertices.ctypes.data,triangles.ctypes.data,len(triangles),depth.ctypes.data,planes.ctypes.data,
+    function=lib.rp_depth_alpha if alpha is not None else lib.rp_depth
+    extra=[ctypes.byref(alpha.native)] if alpha is not None else []
+    count=function(vertices.ctypes.data,triangles.ctypes.data,len(triangles),depth.ctypes.data,planes.ctypes.data,
         owners.ctypes.data if owners is not None else None,owners.dtype.itemsize if owners is not None else 0,int(index),
-        int(camera['width']),int(camera['height']),int(camera['ortho']),float(camera['span']),float(camera['focal']),float(camera['near']),float(camera['far']))
+        int(camera['width']),int(camera['height']),int(camera['ortho']),float(camera['span']),float(camera['focal']),float(camera['near']),float(camera['far']),*extra)
     if count<0:raise RuntimeError('Native CPU depth failed')
     return int(count)
 
@@ -137,30 +146,98 @@ def triangle_mask(vertices,triangles,bounds,ortho,span,focal,near,far,bias,margi
     library().rp_mask(vertices.ctypes.data,triangles.ctypes.data,len(triangles),bounds.ctypes.data,out.ctypes.data,counts.ctypes.data,w,h,int(ortho),span,focal,near,far,bias,margin,tolerance)
     return out,counts
 
-def segments(points,widths,biases,colors,only,enabled,depth,planes,visible,ss,ortho,span,focal,near,far,visibility,eye,inverse_basis,stats,raw_rows=False):
+def segments(points,widths,biases,colors,only,enabled,depth,planes,visible,ss,ortho,span,focal,near,far,visibility,eye,inverse_basis,stats,raw_rows=False,count_only=False):
     arrays=[np.ascontiguousarray(a,dtype) for a,dtype in zip((points,widths,biases,colors,only,enabled),(np.float64,np.float64,np.float64,np.float64,np.bool_,np.uint8))]
     eye=np.ascontiguousarray(eye,np.float64);inverse_basis=np.ascontiguousarray(inverse_basis,np.float64)
-    context=Visibility(*[visibility[i].ctypes.data for i in (0,3,4,5,1,2,6)],len(visibility[0])) if visibility is not None else None
+    context=visibility_context(visibility)
     result=SegmentResult();h,w=depth.shape;lib=library()
     global _segments_lib
     if _segments_lib is None:
         try:
-            extra=ctypes.CDLL(str(Path(__file__).resolve().parents[2]/'plug-ins/2025/reaPencilSegments204.dll'))
+            extra=ctypes.CDLL(str(Path(__file__).resolve().parents[2]/'plug-ins/2025/reaPencilSegments222.dll'))
             extra.rp_segments159.argtypes=lib.rp_segments.argtypes;extra.rp_segments159.restype=ctypes.c_int
+            extra.rp_segments222.argtypes=lib.rp_segments.argtypes+[ctypes.c_int];extra.rp_segments222.restype=ctypes.c_int
             extra.rp_segments159_free.argtypes=[ctypes.POINTER(ctypes.c_double)];extra.rp_segments159_free.restype=None
             extra.rp_segments159_stats.argtypes=[ctypes.c_void_p];extra.rp_segments159_stats.restype=None
             _segments_lib=extra
         except OSError:_segments_lib=False
     function=_segments_lib.rp_segments159 if _segments_lib else lib.rp_segments
+    native_count=bool(count_only and _segments_lib)
+    if native_count:function=_segments_lib.rp_segments222
     free=_segments_lib.rp_segments159_free if _segments_lib else lib.rp_query_free
-    status=function(*[a.ctypes.data for a in arrays],len(points),depth.ctypes.data,planes.ctypes.data,visible.ctypes.data,w,h,int(ss),int(ortho),span,focal,near,far,ctypes.byref(context) if context else None,eye.ctypes.data,inverse_basis.ctypes.data,ctypes.byref(result))
+    status=function(*[a.ctypes.data for a in arrays],len(points),depth.ctypes.data,planes.ctypes.data,visible.ctypes.data,w,h,int(ss),int(ortho),span,focal,near,far,ctypes.byref(context) if context else None,eye.ctypes.data,inverse_basis.ctypes.data,ctypes.byref(result),*([1] if native_count else []))
     if _segments_lib:
         global _last_segment_profile
         measured=np.zeros(9,np.float64);_segments_lib.rp_segments159_stats(measured.ctypes.data)
         _last_segment_profile=dict(zip(('project_seconds','worker_seconds','samples','strokes','stroke_pixels','composite_pixels','ray_trees','cache_hits','projected_segments'),measured.tolist()))
     if status!=0:raise RuntimeError('Native CPU segment allocation failed')
     try:
+        stats[:]=[result.checked,result.hidden]
+        if native_count:return int(result.size)
         rows=np.ctypeslib.as_array(result.rows,shape=(result.size,5)).copy() if result.size else np.empty((0,5))
         stats[:]=[result.checked,result.hidden]
+        if count_only:return int(np.count_nonzero(~arrays[4][rows[:,0].astype(np.intp)]))
         return rows if raw_rows else [(int(row[0]),*row[1:]) for row in rows]
     finally:free(result.rows)
+
+
+def alpha_trim(first,second,triangles,uv):
+    """Exact, ordered CPU alpha intervals without a second capacity pass."""
+    class Result(ctypes.Structure):
+        _fields_=[('rows',ctypes.POINTER(ctypes.c_double)),('size',ctypes.c_int64)]
+    global _alpha_trim_lib
+    try:lib=_alpha_trim_lib
+    except NameError:
+        lib=ctypes.CDLL(str(Path(__file__).resolve().parents[2]/'plug-ins/2025/reaPencilSegments222.dll'))
+        lib.rp_alpha_trim222.argtypes=[ctypes.c_void_p]*4+[ctypes.c_int64,ctypes.c_void_p]
+        lib.rp_alpha_trim222.restype=ctypes.c_int
+        lib.rp_alpha_trim222_free.argtypes=[ctypes.c_void_p];lib.rp_alpha_trim222_free.restype=None
+        _alpha_trim_lib=lib
+    result=Result()
+    if lib.rp_alpha_trim222(first,second,triangles.ctypes.data,uv.ctypes.data,len(triangles),ctypes.byref(result))!=0:
+        raise RuntimeError('CPU alpha intersection clipping failed')
+    try:return np.ctypeslib.as_array(result.rows,shape=(result.size,3)).copy() if result.size else np.empty((0,3))
+    finally:lib.rp_alpha_trim222_free(result.rows)
+
+
+def alpha_points(source,bary,first,count,output):
+    global _alpha_points_lib
+    try:lib=_alpha_points_lib
+    except NameError:
+        lib=ctypes.CDLL(str(Path(__file__).resolve().parents[2]/'plug-ins/2025/reaPencilSegments222.dll'))
+        lib.rp_alpha_points222.argtypes=[ctypes.c_void_p]*2+[ctypes.c_int64]*3+[ctypes.c_void_p]
+        lib.rp_alpha_points222.restype=ctypes.c_int;_alpha_points_lib=lib
+    if lib.rp_alpha_points222(source.ctypes.data,bary.ctypes.data,len(bary),first,count,output.ctypes.data)!=0:
+        raise RuntimeError('CPU alpha contour coordinate expansion failed')
+
+
+def alpha_edges(alpha,tri,faces,prepared,indices,order,ids,begin,end):
+    class Result(ctypes.Structure):
+        _fields_=[('rows',ctypes.POINTER(ctypes.c_double)),('size',ctypes.c_int64)]
+    global _alpha_edges_lib
+    try:lib=_alpha_edges_lib
+    except NameError:
+        lib=ctypes.CDLL(str(Path(__file__).resolve().parents[2]/'plug-ins/2025/reaPencilSegments222.dll'))
+        lib.rp_alpha_edges222.argtypes=[ctypes.c_void_p]*8+[ctypes.c_int64]+[ctypes.c_void_p]*6
+        lib.rp_alpha_edges222.restype=ctypes.c_int
+        lib.rp_alpha_trim222_free.argtypes=[ctypes.c_void_p];lib.rp_alpha_trim222_free.restype=None
+        _alpha_edges_lib=lib
+    values=[np.ascontiguousarray(x,np.int64) for x in (tri,faces,prepared['pairs'],prepared['owners'],prepared['starts'],prepared['counts'],indices,order,ids,begin,end)]
+    unmasked=np.empty(len(indices),np.uint8);result=Result()
+    if lib.rp_alpha_edges222(ctypes.byref(alpha.native),*[x.ctypes.data for x in values[:7]],len(indices),*[x.ctypes.data for x in values[7:]],unmasked.ctypes.data,ctypes.byref(result))!=0:
+        raise RuntimeError('CPU alpha mesh edge clipping failed')
+    try:rows=np.ctypeslib.as_array(result.rows,shape=(result.size,3)).copy() if result.size else np.empty((0,3))
+    finally:lib.rp_alpha_trim222_free(result.rows)
+    return unmasked.astype(bool),rows
+
+
+def alpha_grid(mask,size):
+    global _alpha_grid_lib
+    try:lib=_alpha_grid_lib
+    except NameError:
+        lib=ctypes.CDLL(str(Path(__file__).resolve().parents[2]/'plug-ins/2025/reaPencilSegments222.dll'))
+        lib.rp_alpha_grid222.argtypes=[ctypes.c_void_p,ctypes.c_int64,ctypes.c_void_p];lib.rp_alpha_grid222.restype=ctypes.c_int
+        _alpha_grid_lib=lib
+    grid=np.empty((size,size),np.uint8)
+    if lib.rp_alpha_grid222(ctypes.byref(mask),size,grid.ctypes.data)!=0:raise RuntimeError('CPU alpha acceleration grid failed')
+    return grid

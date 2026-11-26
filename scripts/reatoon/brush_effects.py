@@ -9,8 +9,9 @@ def leaves(style):
     return [s for channel in style['_brush_channels'] for s in [channel['settings'],*channel['brushes'].values()]]
 
 def required(styles):
+    from .brush_maps import active as mapped
     independent=any('_brush_channels' in s for s in styles) or len(styles)>1
-    return any(s.get('alpha_depth_reduction') or s.get('width_depth_reduction') or s.get('blend_mode',0)!=0 or
+    return any(mapped(s) or s.get('alpha_depth_reduction') or s.get('width_depth_reduction') or s.get('blend_mode',0)!=0 or
                (independent and (s.get('line_opacity',1.)!=1. or s.get('alpha_profile') or s.get('width_profile')))
                for parent in styles for s in leaves(parent))
 
@@ -74,7 +75,66 @@ def reference_group(segments,camera,depth,planes,layer,ss,visibility=None,group_
         else:r._over(view,edge)
     return total
 
-def render(segments,camera,depth,planes,visible,hidden,ss,visibility=None,compiled=True,group_image=None,mesh_groups=None,elements=()):
+def render_streamed_brush(segments, camera, depth, planes, visible, ss, visibility):
+    """Reuse one coverage canvas per brush width and bounded native batches."""
+    from .cpu_brush import render_packed
+    from .stroke_presets import iter_packed_brush_parts, lanes
+
+    layers = {}
+    stats = dict(classified_edges=0, visible_segments=0, hidden_segments=0,
+                 brush_layers=0, merge_suppressed_samples=0, element_brush_renders=0,
+                 segment_backend='native-cpu-streamed-brush-layers',
+                 profile_backend='native-cpu-adaptive-bezier', peak_brush_batch=0)
+    pending = []
+    count = 0
+
+    def flush():
+        style = pending[0]['settings']
+        if id(style) not in layers:
+            layers[id(style)] = (style, np.zeros_like(visible))
+        layer = layers[id(style)][1]
+        prepared = [dict(part, settings=dict(style, output_to_elements_only=False)) for part in pending]
+        batch = render_packed(_subset(prepared), camera, depth, planes, layer, ss, visibility,
+                              union_coverage=True)
+        if batch is None:
+            raise RuntimeError('Streamed brush batch could not use the native rasterizer')
+        stats['classified_edges'] += batch['classified_edges']
+        if not style.get('output_to_elements_only', False):
+            stats['visible_segments'] += batch['visible_segments']
+        stats['peak_brush_batch'] = max(stats['peak_brush_batch'], count)
+
+    for part in iter_packed_brush_parts(segments, camera, ss):
+        for start in range(0, part['count'], 262144):
+            end = min(start+262144, part['count'])
+            if pending and (part['settings'] is not pending[0]['settings'] or count+end-start > 262144):
+                flush()
+                pending.clear()
+                count = 0
+            pending.append(dict(part, points=part['points'][start:end],
+                                flags=part['flags'][start:end], count=end-start))
+            count += end-start
+    if pending:
+        flush()
+    source_style = next(iter(segments.styles()))
+    for style, layer in layers.values():
+        if style is not source_style:
+            # Thin lanes are combined by maximum coverage. Compensate for the
+            # split in ink density on the already depth-tested coverage layer.
+            # Preserve the sampled footprint, texture gaps and premultiplied RGB.
+            gain = float(lanes(source_style))
+            for first in range(0, len(layer), 32):
+                rows = layer[first:first+32]
+                alpha = rows[..., 3]
+                factor = np.minimum(gain, 1./np.maximum(alpha, 1./gain))
+                rows *= factor[..., None]
+        opacity = float(style.get('line_opacity', 1.))
+        if opacity and not style.get('output_to_elements_only', False):
+            composite(visible, layer, int(style.get('blend_mode', 0)), opacity)
+        stats['brush_layers'] += int(opacity != 0)
+    return visible, stats
+
+
+def render(segments,camera,depth,planes,visible,hidden,ss,visibility=None,compiled=True,group_image=None,mesh_groups=None,elements=(),map_textures=None):
     # Equal element filters share a canvas; compose it once regardless of file format.
     unique_elements={}
     for element,layer in elements:unique_elements.setdefault(id(layer),(element,layer))
@@ -87,6 +147,8 @@ def render(segments,camera,depth,planes,visible,hidden,ss,visibility=None,compil
             if 'intersection' in row['features']:flags|=128
             part=dict(points=np.asarray([[row['a'],row['b']]],float),flags=np.asarray([flags],np.uint8),settings=row['settings'],mesh=row['mesh'],mesh_index=row['mesh_index'],line=row.get('line'),count=1)
             if '_vertex_ids' in row:part['vertex_ids']=np.asarray([row['_vertex_ids']],np.int64)
+            if '_profile_u' in row:part['profile_u']=np.asarray([row['_profile_u']],float)
+            if '_map_uvs' in row:part['map_uvs']={k:np.asarray([v],float) for k,v in row['_map_uvs'].items()}
             packed.parts.append(part);packed.count+=1
         segments=packed
     segments._flush();groups={};line_order={};identities={}
@@ -96,7 +158,7 @@ def render(segments,camera,depth,planes,visible,hidden,ss,visibility=None,compil
         hide=style.get('_visibility_mode')==-1
         sid=id(style)
         if sid not in identities:
-            keys=('line_color','line_width','line_opacity','blend_mode','width_profile','alpha_profile','alpha_depth_reduction','width_depth_reduction','alpha_reduction_origin','width_reduction_origin','profile_direction','profile_split_angle','profile_loop_direction','pencil_profile_width','dash_length','dash_gap','depth_bias','output_to_elements_only')
+            keys=('brush_maps','line_color','line_width','line_opacity','blend_mode','width_profile','alpha_profile','alpha_depth_reduction','width_depth_reduction','alpha_reduction_origin','width_reduction_origin','profile_direction','profile_split_angle','profile_loop_direction','pencil_profile_width','dash_length','dash_gap','depth_bias','output_to_elements_only')
             identities[sid]=(style.get('brush_key') or sid,json.dumps({k:style.get(k) for k in keys},sort_keys=True))
         key=(order,hide,identities[sid])
         if key not in groups:groups[key]=[]
@@ -114,7 +176,12 @@ def render(segments,camera,depth,planes,visible,hidden,ss,visibility=None,compil
         if any(float(s.get(k,0))!=0 for s in packed.styles() for k in ('distance_reduction','width_variation','taper')):
             raise ValueError('Independent brush effects with reduction/variation/taper are not implemented')
         curves=any(s.get('width_profile') or s.get('alpha_profile') or s.get('alpha_depth_reduction') or s.get('width_depth_reduction') for s in packed.styles());batch=None
-        if compiled and (curves or group_image is not None or depth_range is not None):
+        from . import brush_maps
+        if any(brush_maps.active(s) for s in packed.styles()):
+            batch=brush_maps.render(packed,camera,depth,planes,scratch,ss,map_textures or {},visibility,group_image,mesh_groups,depth_range)
+            stats['map_samples']=stats.get('map_samples',0)+batch['map_samples']
+            stats['peak_map_batch']=max(stats.get('peak_map_batch',0),batch['peak_map_batch'])
+        elif compiled and (curves or group_image is not None or depth_range is not None):
             from .cpu_brush import render_packed
             batch=render_packed(packed,camera,depth,planes,scratch,ss,visibility,union_coverage=curves,group_image=group_image,mesh_groups=mesh_groups,depth_range=depth_range,retain_coordinates=bool(elements))
             if curves:stats['profile_backend']='native-cpu-adaptive-bezier'
@@ -141,6 +208,7 @@ def render(segments,camera,depth,planes,visible,hidden,ss,visibility=None,compil
             item=dict(part,count=int(keep.sum()))
             for name in ('points','flags','vertex_ids','profile_u'):
                 if name in item:item[name]=item[name][keep]
+            if 'map_uvs' in item:item['map_uvs']={k:v[keep] for k,v in item['map_uvs'].items()}
             selected.append(item)
         return selected
     ordered=sorted(groups,key=lambda k:(k[0],not k[1]))

@@ -53,7 +53,23 @@ static int profile_segment_range(const double* us,const double* luts,const int64
  double sx=px+t0*dx,sy=py+t0*dy,ex=px+t1*dx,ey=py+t1*dy;
 
  if(!run){ax=sx/ss;ay=sy/ss;run=true;}bx=ex/ss;by=ey/ss;}
- if(run)record();if(touched){for(int y=std::max(0,rowlo-ymin);y<std::min(ymax-ymin,rowhi-ymin);++y)for(int x=0;x<xmax-xmin;++x){auto e=edge.data()+(int64_t(y)*(xmax-xmin)+x)*4;auto v=visible+(int64_t(y+ymin)*w+x+xmin)*4;if(alpha_profiles[index]&1){if(e[3]>v[3])for(int c=0;c<4;++c)v[c]=e[c];}else{float inv=1.f-e[3];for(int c=0;c<4;++c){float product=float(v[c]*inv);v[c]=float(e[c]+product);}}}}
+ if(run)record();
+ if(touched){
+  for(int y=std::max(0,rowlo-ymin);y<std::min(ymax-ymin,rowhi-ymin);++y)for(int x=0;x<xmax-xmin;++x){
+   // UV-map pieces own disjoint longitudinal cells. Round caps otherwise
+   // overwrite colours up to half a brush width beyond their sample location.
+   // Keep true source endpoints round; legacy strokes never set these bits.
+   if(alpha_profiles[index]&12){
+    double along=(x+xmin+.5-original_ax)*original_dx+(y+ymin+.5-original_ay)*original_dy;
+    if((alpha_profiles[index]&4)&&along<0.)continue;
+    if((alpha_profiles[index]&8)&&along>=original_den)continue;
+   }
+   auto e=edge.data()+(int64_t(y)*(xmax-xmin)+x)*4;
+   auto v=visible+(int64_t(y+ymin)*w+x+xmin)*4;
+   if(alpha_profiles[index]&1){if(e[3]>v[3])for(int c=0;c<4;++c)v[c]=e[c];}
+   else{float inv=1.f-e[3];for(int c=0;c<4;++c){float product=float(v[c]*inv);v[c]=float(e[c]+product);}}
+  }
+ }
  }
  result->size=records.size()/5;if(!records.empty()){result->rows=new double[records.size()];std::copy(records.begin(),records.end(),result->rows);}return 0;
  }catch(...){return -1;}

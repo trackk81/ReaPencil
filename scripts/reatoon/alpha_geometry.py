@@ -193,10 +193,12 @@ def triangulate_uv(triangle,cells,wrap=True,_bounds=None):
     return result
 
 
-def cut_mesh(vertices,triangles,triangle_faces,triangle_uvs,face_cells,wrap=True):
+def cut_mesh(vertices,triangles,triangle_faces,triangle_uvs,face_cells,wrap=True,triangle_budget=None):
     """Build cutout topology; map every output vertex to three source vertices."""
     vertices=np.asarray(vertices,np.float64);triangles=np.asarray(triangles,np.int64)
     points=[];bind_ids=[];bind_weights=[];faces=[];source_faces=[];lookup={};templates={};bounds={}
+    output_triangles = 0
+    identity = np.eye(3)
     def vertex(ids,weights):
         # The sparse original-vertex binding also welds across triangle/UV seams.
         values={int(i):float(w) for i,w in zip(ids,weights) if abs(w)>1e-9}
@@ -204,16 +206,38 @@ def cut_mesh(vertices,triangles,triangle_faces,triangle_uvs,face_cells,wrap=True
         if key not in lookup:
             lookup[key]=len(points);points.append(weights@vertices[ids]);bind_ids.append(ids);bind_weights.append(weights)
         return lookup[key]
+    def polygons_for(cells,uv):
+        key=(id(cells),tuple(np.round(np.asarray(uv).ravel(),12)),wrap)
+        if key not in templates:
+            if isinstance(cells,np.ndarray) and id(cells) not in bounds:
+                bounds[id(cells)]=(cells.min(axis=1),cells.max(axis=1))
+            templates[key]=triangulate_uv(uv,cells,wrap,_bounds=bounds.get(id(cells)))
+        return templates[key]
+    if triangle_budget is not None:
+        for face,uv in zip(triangle_faces,triangle_uvs):
+            cells=face_cells.get(int(face))
+            output_triangles += (1 if cells is None else
+                                 sum(1 if len(poly)==3 else len(poly) for poly in polygons_for(cells,uv)))
+            if output_triangles > triangle_budget:
+                raise ValueError('Alpha cutout exceeds the preview triangle budget (%d)' % triangle_budget)
     for ids,face,uv in zip(triangles,triangle_faces,triangle_uvs):
         cells=face_cells.get(int(face))
-        if cells is None:polygons=[np.eye(3)]
+        if cells is None:
+            poly=[]
+            for index, source in enumerate(ids):
+                key=((int(source),1.),)
+                if key not in lookup:
+                    lookup[key]=len(points)
+                    points.append(vertices[source])
+                    bind_ids.append(ids)
+                    bind_weights.append(identity[index])
+                poly.append(lookup[key])
+            if len(set(poly))==3:
+                faces.append(poly)
+                source_faces.append(int(face))
+            continue
         else:
-            key=(id(cells),tuple(np.round(np.asarray(uv).ravel(),12)),wrap)
-            if key not in templates:
-                if isinstance(cells,np.ndarray) and id(cells) not in bounds:
-                    bounds[id(cells)]=(cells.min(axis=1),cells.max(axis=1))
-                templates[key]=triangulate_uv(uv,cells,wrap,_bounds=bounds.get(id(cells)))
-            polygons=templates[key]
+            polygons=polygons_for(cells,uv)
         for weights in polygons:
             poly=[vertex(ids,w) for w in weights]
             # Source winding is preserved by the barycentric polygon ordering.

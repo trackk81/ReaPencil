@@ -136,11 +136,14 @@ def render_current(camera=None, width=None, height=None, display=True, output_pr
     """
     global _LAST_RESULT
     from . import maya_scene
-    camera = _camera_shape(camera)
-    settings = _settings(width, height)
-    result = maya_scene.render_scene(output_prefix or _output_prefix(camera), camera, settings,
-                                    auxiliary_outputs=auxiliary_outputs)
-    result['render_view_displayed'] = _display_image(result['paths']['beauty']) if display else False
+    from .render_progress import RenderProgress
+    with RenderProgress() as progress:
+        camera = _camera_shape(camera)
+        settings = _settings(width, height)
+        result = maya_scene.render_scene(output_prefix or _output_prefix(camera), camera, settings,
+                                        auxiliary_outputs=auxiliary_outputs, progress=progress)
+        if display:progress('display')
+        result['render_view_displayed'] = _display_image(result['paths']['beauty']) if display else False
     _LAST_RESULT = result
     return result
 

@@ -8,7 +8,7 @@ _lib=None
 def library():
     global _lib
     if _lib is None:
-        _lib=c.CDLL(str(Path(__file__).resolve().parents[2]/'plug-ins/2025/reaPencilBrush125.dll'))
+        _lib=c.CDLL(str(Path(__file__).resolve().parents[2]/'plug-ins/2025/reaPencilBrush223.dll'))
         _lib.rp_profile_runs.argtypes=[c.c_void_p,c.c_int,c.c_int,c.c_int64,c.c_void_p,c.c_int64,c.c_void_p,c.c_double,c.c_double,c.c_double,c.c_double,c.c_void_p,c.c_int,c.c_void_p,c.c_int]
         _lib.rp_profile_runs.restype=c.c_int
     return _lib
@@ -67,7 +67,7 @@ def draw_runs(layer,runs,original,u0,u1,width,width_table,alpha_table,smoothing=
 def render_segments(records,camera,depth,planes,visible,ss,visibility=None,union_coverage=False):
     """Complete CPU batches for profile raster, without Python per-edge sampling."""
     from .brush_profiles import stroke_tables
-    from .native_cpu import Visibility,SegmentResult
+    from .native_cpu import visibility_context,SegmentResult
     rows=list(records);n=len(rows)
     if not n:return dict(classified_edges=0,visible_segments=0,hidden_segments=0)
     styles=[r['settings'] for r in rows]
@@ -90,8 +90,8 @@ def render_segments(records,camera,depth,planes,visible,ss,visibility=None,union
 
 
 def _execute(arrays,camera,depth,planes,visible,ss,visibility,n,group_image=None,group_ids=None,depth_range=None,reductions=None,size_reductions=None,alpha_references=None,width_references=None):
-    from .native_cpu import Visibility,SegmentResult
-    context=Visibility(*[visibility[i].ctypes.data for i in (0,3,4,5,1,2,6)],len(visibility[0])) if visibility is not None else None
+    from .native_cpu import visibility_context,SegmentResult
+    context=visibility_context(visibility)
     eye=np.ascontiguousarray(camera['eye'],np.float64);basis=np.ascontiguousarray(np.linalg.inv(camera['basis']).T,np.float64)
     lib=library();lib.rp_profile_segments.argtypes=[c.c_void_p]*10+[c.c_int64]+[c.c_void_p]*3+[c.c_int]*4+[c.c_double]*4+[c.c_void_p]*8
     lib.rp_profile_segments.restype=c.c_int;lib.rp_profile_free.argtypes=[c.c_void_p];lib.rp_profile_free.restype=None
@@ -131,6 +131,78 @@ def _execute(arrays,camera,depth,planes,visible,ss,visibility,n,group_image=None
     finally:lib.rp_profile_free(result.rows)
 
 
+def _clip_packed_depth(packed, camera, ss, brush_margin=False):
+    """Clip each packed part before allocating native brush work arrays."""
+    from .packed_segments import PackedSegments
+    result = PackedSegments()
+    near, far = camera['near'], camera['far']
+    forward = camera['basis'][2]
+    for part in packed.parts:
+        world = part['points']
+        z = (world-camera['eye']) @ forward
+        keep = (z.max(axis=1) >= near) & (z.min(axis=1) <= far)
+        if not keep.any():
+            continue
+        clipped = dict(part, count=int(keep.sum()))
+        for key in ('points', 'flags', 'vertex_ids', 'profile_u', 'mapped_widths', 'mapped_colors', 'map_caps'):
+            if key in part:
+                clipped[key] = part[key][keep] if not keep.all() else part[key]
+        if 'map_uvs' in part:
+            clipped['map_uvs']={k:v[keep].copy() for k,v in part['map_uvs'].items()}
+        z = z[keep]
+        for endpoint in (0, 1):
+            outside = (z[:, endpoint] < near) | (z[:, endpoint] > far)
+            if not outside.any():
+                continue
+            if clipped['points'] is part['points']:
+                clipped['points'] = clipped['points'].copy()
+            # Interpolate from the original endpoints even if both need clipping.
+            original = world[np.flatnonzero(keep)[outside]]
+            depth = z[outside, endpoint]
+            boundary = np.clip(depth, near, far)
+            t = (boundary-depth)/(z[outside, 1-endpoint]-depth)
+            clipped['points'][outside, endpoint] = original[:, endpoint] + t[:, None]*(original[:, 1-endpoint]-original[:, endpoint])
+            for key,uv in part.get('map_uvs',{}).items():
+                source=uv[np.flatnonzero(keep)[outside]]
+                clipped['map_uvs'][key][outside,endpoint]=source[:,endpoint]+t[:,None]*(source[:,1-endpoint]-source[:,endpoint])
+            if 'vertex_ids' in clipped:
+                if clipped['vertex_ids'] is part['vertex_ids']:
+                    clipped['vertex_ids'] = clipped['vertex_ids'].copy()
+                clipped['vertex_ids'][outside, endpoint] = -1
+            if 'profile_u' in clipped:
+                if clipped['profile_u'] is part['profile_u']:
+                    clipped['profile_u'] = clipped['profile_u'].copy()
+                uv = part['profile_u'][np.flatnonzero(keep)[outside]]
+                other_depth = z[outside, 1-endpoint]
+                u = t if camera['ortho'] else t*other_depth/boundary
+                clipped['profile_u'][outside, endpoint] = uv[:, endpoint] + u*(uv[:, 1-endpoint]-uv[:, endpoint])
+        # For depth-only brushes, the native path does not need off-screen
+        # topology. A projected line stays inside its endpoints' rectangle.
+        from .renderer import _project
+        projected = _project((clipped['points']-camera['eye']) @ camera['basis'].T, camera)
+        style = part['settings']
+        reduction = style.get('width_depth_reduction')
+        scale = max(1., *reduction[2:]) if reduction else 1.
+        pad = float(style['line_width'])*ss*scale/2+2
+        if brush_margin:
+            pad += ss*(2*float(style.get('pattern_amplitude',3.)) + float(style.get('pattern_period',20.))
+                       + float(style['line_width'])*style.get('brush_width_scale',1.)
+                       *(1+abs(style.get('brush_roughness',1.))))
+        low, high = projected.min(axis=1), projected.max(axis=1)
+        on_screen = np.all((high >= -pad) & (low <= [camera['width']+pad, camera['height']+pad]),axis=1)
+        if not on_screen.any():
+            continue
+        if not on_screen.all():
+            for key in ('points', 'flags', 'vertex_ids', 'profile_u', 'mapped_widths', 'mapped_colors', 'map_caps'):
+                if key in clipped:
+                    clipped[key] = clipped[key][on_screen]
+            if 'map_uvs' in clipped:clipped['map_uvs']={k:v[on_screen] for k,v in clipped['map_uvs'].items()}
+            clipped['count'] = int(on_screen.sum())
+        result.parts.append(clipped)
+        result.count += clipped['count']
+    return result
+
+
 def render_packed(packed,camera,depth,planes,visible,ss,visibility=None,union_coverage=False,group_image=None,mesh_groups=None,depth_range=None,retain_coordinates=False):
     """Keep large batches packed through topology, projection and rasterization."""
     packed._flush()
@@ -139,6 +211,12 @@ def render_packed(packed,camera,depth,planes,visible,ss,visibility=None,union_co
     styles=list(packed.styles())
     if any((s.get('hidden_lines') and s.get('_visibility_mode')!=-1) or any(float(s.get(k,0))!=0 for k in ('dash_length','distance_reduction','width_variation','taper')) for s in styles):return None
     from .brush_profiles import stroke_tables
+    # Element replay requires the original source-to-coordinate mapping.
+    if not retain_coordinates and not any(s.get('width_profile') or s.get('alpha_profile') for s in styles):
+        packed = _clip_packed_depth(packed, camera, ss)
+        if not len(packed):
+            return dict(classified_edges=0,visible_segments=0,hidden_segments=0)
+        styles = list(packed.styles())
     world,widths,biases,colors,only,enabled=packed.arrays();enabled=enabled.astype(np.uint8);points=np.ascontiguousarray((world-camera['eye'])@camera['basis'].T,np.float64)
     if np.any(points[:,:,2]<=0):return None
     n=len(points);u=np.empty((n,2));keys=np.empty((n,4),np.int64);vertices=np.full((n,2),-1,np.int64)
@@ -152,6 +230,7 @@ def render_packed(packed,camera,depth,planes,visible,ss,visibility=None,union_co
         sid,off=cache[key];offsets[sl]=off;
         if s.get('_visibility_mode')==-1:enabled[sl]=np.where(enabled[sl]!=0,np.uint8(3),np.uint8(0))
         alpha[sl]=int(bool(s.get('alpha_profile')) or bool(s.get('alpha_depth_reduction')) or bool(s.get('width_depth_reduction')) or union_coverage)|(2 if '_profile_source_width' in s else 0);angles[sl]=[s.get('profile_direction',-30.),s.get('profile_split_angle',0.),s.get('profile_loop_direction',0)]
+        if 'map_caps' in part:alpha[sl]|=part['map_caps']
         line=part.get('line');lid=lines.setdefault(line,len(lines));keys[sl,0]=part['mesh_index'];keys[sl,1]=sid;keys[sl,2]=lid;keys[sl,3]=part['flags']
         if 'vertex_ids' in part:vertices[sl]=part['vertex_ids']
         start=end

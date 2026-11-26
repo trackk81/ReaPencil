@@ -8,7 +8,7 @@ import numpy as np
 
 
 def rasterize_mesh(camverts, tris, camera, depth, depth_planes,
-                   mesh_owners=None, mesh_index=-1):
+                   mesh_owners=None, mesh_index=-1, alpha=None):
     vertices=np.ascontiguousarray(camverts,dtype=np.float64)
     raw_triangles=np.asarray(tris)
     if raw_triangles.size and (not np.isfinite(raw_triangles).all()
@@ -33,8 +33,9 @@ def rasterize_mesh(camverts, tris, camera, depth, depth_planes,
     else:
         mesh_owners=np.empty((1,1),np.int32)
     from .native_cpu import depth as native_depth
-    count=native_depth(vertices,triangles,camera,depth,depth_planes,mesh_owners if has_owners else None,mesh_index)
+    count=native_depth(vertices,triangles,camera,depth,depth_planes,mesh_owners if has_owners else None,mesh_index,alpha=alpha)
     if count is not None:return {'backend':'native-cpu-tiled-depth','triangles':count}
+    if alpha is not None:raise RuntimeError('CPU alpha masking requires the matching native CPU library')
     from .accelerator import enable
     enable()
     try:

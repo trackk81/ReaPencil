@@ -1,7 +1,7 @@
 """Original, deterministic CPU cel/edge renderer. No Maya or Pencil+ dependency.
 
 This is a reference implementation, not a Pencil+ renderer or file-format clone.
-Cast shadows, texture sampling, curved strokes and PLD are not implemented.
+Surface texture shading, cast shadows and PLD are not implemented.
 Polygon edges drive wire/crease/material features. CPU outlines can follow the
 rendered triangle silhouette, including internal nonplanar-quad transitions.
 Noncoplanar intersections use an independent triangle AABB BVH implementation.
@@ -24,7 +24,7 @@ from .intersections import find_intersections, find_render_intersections
 DEFAULTS = dict(width=640, height=480, supersample=2, background=[1, 1, 1],
                 line_image={}, brush_image={}, brush_stamp_spacing=24., line_pattern=0, brush_preset=0, brush_roughness=1., brush_density=1., brush_width_scale=1., pattern_period=20., pattern_amplitude=3.,
                 line_width=1.5, line_color=[0.04, 0.04, 0.07], hidden_lines=False,
-                feature_brushes={}, hidden_style={},
+                feature_brushes={}, hidden_style={}, brush_maps={},
                 hidden_color=[0.5, 0.5, 0.6], outline=True, open_edges=True,
                 crease=True, crease_angle=40.0, crease_angle_max=180.0, material_boundaries=True,
                 selected_edges=True, wireframe=False, hard_edges=True,
@@ -78,9 +78,27 @@ def _camera(config, width, height):
     basis=np.stack([right,up,forward])
     if ortho:basis[1]*=film_aspect/(width/height)
     else:basis[0]*=(width/height)/film_aspect
+    focal = height / (2 * math.tan(math.radians(fov) / 2))
+    frustum = config.get("render_frustum")
+    if frustum is not None:
+        left, right_edge, bottom, top = map(float, frustum)
+        horizontal, vertical = right_edge-left, top-bottom
+        if not all(map(math.isfinite, (left, right_edge, bottom, top))) or min(horizontal, vertical) <= 0:
+            raise ValueError("Camera rendering frustum is invalid")
+        center_x, center_y = (left+right_edge)*.5, (bottom+top)*.5
+        if ortho:
+            eye = eye + center_x*right + center_y*up
+            span = horizontal
+            basis[1] = up * (height*horizontal/(width*vertical))
+        else:
+            # Shear the camera coordinates while retaining forward depth.
+            # The inverse basis also maps centered raster rays back into world space.
+            focal = height*near/vertical
+            basis[0] = (right - forward*(center_x/near)) * (width*vertical/(height*horizontal))
+            basis[1] = up - forward*(center_y/near)
     return dict(eye=eye, forward=forward, basis=basis,
                 near=near, far=far, ortho=ortho, span=span, width=width,
-                height=height, focal=height / (2 * math.tan(math.radians(fov) / 2)))
+                height=height, focal=focal)
 
 
 def _project(points, camera):
@@ -456,7 +474,9 @@ def line_style_passes(scene, settings=None):
                 style[key] *= scale
             if style.get('dash_gap', -1.) >= 0:
                 style['dash_gap'] *= scale
-        if (style.get('pencil_profile_width',False) and (style.get('width_profile') or style.get('alpha_profile'))) or style.get('width_depth_reduction'):
+        width_map=style.get('brush_maps',{}).get('width',{})
+        mapped_width=bool(width_map and width_map.get('enabled',True) and width_map.get('amount',1.)>0)
+        if (style.get('pencil_profile_width',False) and (style.get('width_profile') or style.get('alpha_profile'))) or style.get('width_depth_reduction') or mapped_width:
             style['_profile_source_width']=float(style['line_width'])
             style['_profile_width_scale']=brush_scale
             nominal=style['line_width']/brush_scale if brush_scale>0 else 0.
@@ -467,7 +487,7 @@ def line_style_passes(scene, settings=None):
         if raw.get('alpha_depth_reduction'):
             from .depth_reduction import validate
             raw['alpha_depth_reduction']=validate(raw['alpha_depth_reduction'])
-        if cfg.get('_cpu_brush_channels') and (raw.get('feature_brushes') or raw.get('hidden_style') or raw.get('blend_mode',0)!=0 or raw.get('hidden_lines') and (raw.get('line_opacity',1.)!=1. or raw.get('width_profile') or raw.get('alpha_profile'))):
+        if cfg.get('_cpu_brush_channels') and (raw.get('feature_brushes') or raw.get('hidden_style') or raw.get('blend_mode',0)!=0 or raw.get('hidden_lines') and (raw.get('brush_maps') or raw.get('line_opacity',1.)!=1. or raw.get('width_profile') or raw.get('alpha_profile'))):
             from .brush_channels import prepare
             return prepare(raw,resolve_basic)
         return resolve_basic(overrides)
@@ -516,7 +536,7 @@ def line_style_passes(scene, settings=None):
     return result
 
 
-def world_line_segments(scene, settings=None, intersections=None, prepared_edges=None, intersection_masks=None, style_passes=None, packed=False,prepared_intersections=None,prepared_outlines=None,edge_visibility_masks=None):
+def world_line_segments(scene, settings=None, intersections=None, prepared_edges=None, intersection_masks=None, style_passes=None, packed=False,prepared_intersections=None,prepared_outlines=None,edge_visibility_masks=None,progress=None):
     """Return camera-selected world-space segments for rendering or VP2.
 
     Result contains ``segments``, ``warnings`` and ``intersection_diagnostics``.
@@ -565,9 +585,13 @@ def world_line_segments(scene, settings=None, intersections=None, prepared_edges
         warnings.append("Intersection lines use supplied triangles; coplanar overlaps and point-only contacts are omitted. Self mode excludes shared vertices and same-polygon pairs.")
     else:
         intersections = []
+    if any(m.get('_cpu_alpha') for m in meshes):
+        from .cpu_alpha import trim_intersections
+        intersections=trim_intersections(meshes,intersections,progress=progress)
     for item in passes:
         styles, face_ids = item["styles"], item["face_style_ids"]
         for index, mesh in enumerate(meshes):
+            if progress:progress("lines", index, len(meshes), mesh.get("name", ""))
             prepared = prepared_edges[index]
             sentinel = len(styles)
             ids=face_ids[index]
@@ -614,6 +638,9 @@ def world_line_segments(scene, settings=None, intersections=None, prepared_edges
                 for indices,flags,local in routes:
                     chosen=indices[edge_styles[indices] == style_id]
                     if edge_keep is not None:chosen=chosen[edge_keep[index][chosen]]
+                    if mesh.get('_cpu_alpha'):
+                        from .cpu_alpha import clip_edges
+                        chosen=clip_edges(mesh,prepared,chosen,flags,local,item['line'],index,segments)
                     if packed:
                         segments.add_edges(mesh,index,prepared,chosen,flags,local,item['line'])
                     else:
@@ -630,8 +657,12 @@ def world_line_segments(scene, settings=None, intersections=None, prepared_edges
                     if triangle_outlines is not None and local.get('outline'):
                         chosen=np.flatnonzero(diagonal_styles==style_id)
                         if diagonal_keep is not None:chosen=chosen[diagonal_keep[index][chosen]]
+                        if mesh.get('_cpu_alpha'):
+                            from .cpu_alpha import clip_edges
+                            diagonal_data=dict(vertices=prepared['vertices'],pairs=diagonal_pairs,owners=diagonal_faces,starts=np.arange(len(diagonal_pairs)),counts=np.ones(len(diagonal_pairs),np.int32))
+                            chosen=clip_edges(mesh,diagonal_data,chosen,np.full(len(diagonal_pairs),4,np.uint8),local,item['line'],index,segments)
                         if packed:
-                            segments.add_edges(mesh,index,dict(vertices=prepared['vertices'],pairs=diagonal_pairs),
+                            segments.add_edges(mesh,index,dict(vertices=prepared['vertices'],pairs=diagonal_pairs,owners=diagonal_faces,starts=np.arange(len(diagonal_pairs)),counts=np.ones(len(diagonal_pairs),np.int32)),
                                 chosen,np.full(len(diagonal_pairs),4,np.uint8),local,item['line'])
                         else:
                             for pair in diagonal_pairs[chosen]:
@@ -639,6 +670,9 @@ def world_line_segments(scene, settings=None, intersections=None, prepared_edges
                                     features=['outline'],mesh_index=index,mesh=mesh.get('name','mesh'),settings=local,line=item['line']))
                                 if local.get('connect_collinear_dashes',False) or local.get('width_profile') or local.get('alpha_profile') or local.get('width_depth_reduction'):
                                     segments[-1]['_vertex_ids']=tuple(int(v) for v in pair)
+            if mesh.get('_cpu_alpha'):
+                from .cpu_alpha import append_boundaries
+                append_boundaries(mesh,index,face_ids[index],styles,item['line'],segments,camera,edge_visibility_masks[index] if edge_visibility_masks is not None else None)
         if packed and hasattr(intersections,'batches'):
             sentinel=len(styles)
             for first,second,rows in intersections.batches:
@@ -655,13 +689,14 @@ def world_line_segments(scene, settings=None, intersections=None, prepared_edges
                     sid=np.where(sid<0,sentinel,sid)
                     ids.append(np.where(allowed[sid],sid,sentinel))
                 chosen=np.minimum(ids[0],ids[1])
-                owners=np.where(ids[0]<=ids[1],first,second)
+                sides=np.where(ids[0]<=ids[1],0,1)
+                owners=np.where(sides==0,first,second)
                 # Preserve original record/painter order, including alternating
                 # materials at adjacent triangles. Group only consecutive runs.
-                cuts=np.r_[0,np.flatnonzero((chosen[1:]!=chosen[:-1])|(owners[1:]!=owners[:-1]))+1,len(rows)]
+                cuts=np.r_[0,np.flatnonzero((chosen[1:]!=chosen[:-1])|(owners[1:]!=owners[:-1])|(sides[1:]!=sides[:-1]))+1,len(rows)]
                 for lo,hi in zip(cuts[:-1],cuts[1:]):
                     sid=int(chosen[lo]);index=int(owners[lo])
-                    if sid<sentinel:segments.add_intersections(meshes[index],index,rows[lo:hi],styles[sid],item['line'],first==second)
+                    if sid<sentinel:segments.add_intersections(meshes[index],index,rows[lo:hi],styles[sid],item['line'],first==second,triangle_column=6+int(sides[lo]))
             continue
         for intersection in intersections:
             first, second = intersection["mesh_indices"]
@@ -689,6 +724,9 @@ def world_line_segments(scene, settings=None, intersections=None, prepared_edges
     if any(m.get('_surface_strokes') for m in meshes):
         from .surface_strokes import append
         append(scene,passes,segments)
+    if any(m.get('_cpu_alpha') for m in meshes):
+        from .cpu_alpha import connect_profiles
+        connect_profiles(meshes,segments)
     return dict(segments=segments, warnings=warnings, intersection_diagnostics=diagnostic,
                 certified_hidden_edges=(sum(int(np.count_nonzero(~keep)) for keep in edge_keep+diagonal_keep)
                                         if edge_keep is not None else 0))
@@ -797,7 +835,7 @@ def _white_matte_rgba(layer):
     return result
 
 
-def render(scene, output_prefix, settings=None, depth_prepass=None):
+def render(scene, output_prefix, settings=None, depth_prepass=None, progress=None):
     """Render scene to six image/vector passes and a JSON manifest.
 
     Edges and triangles are clipped against near/far planes. Perspective depth
@@ -864,7 +902,7 @@ def render(scene, output_prefix, settings=None, depth_prepass=None):
     meshes = scene.get("meshes", [])
     stats = dict(meshes=len(meshes), triangles=0, classified_edges=0, visible_segments=0, hidden_segments=0,
                  width=width, height=height, supersample=ss)
-    warnings = ["Reference renderer: partial Pencil snapshot import only; no native Pencil evaluation, texture sampling, cast shadows or PLD.",
+    warnings = ["Reference renderer: partial Pencil snapshot import only; no native Pencil evaluation, surface texture shading, cast shadows or PLD.",
                 "Vector strokes use sampled visibility and widths; depth PNG maps camera near to white and far to black."]
     stroke_fn=_stroke
     stats['stroke_backend']='python-cpu-reference'
@@ -906,6 +944,7 @@ def render(scene, output_prefix, settings=None, depth_prepass=None):
     group_image = None
     if any(s.get('hidden_lines',False) for s in all_styles):hidden=np.zeros_like(visible)
     for mesh_index, mesh in enumerate(meshes):
+        if progress:progress("depth", mesh_index, len(meshes), mesh.get("name", ""))
         verts = np.asarray(mesh["vertices"], dtype=float)
         if verts.ndim != 2 or verts.shape[1] != 3 or not np.isfinite(verts).all():
             raise ValueError("Mesh vertices must be a finite Nx3 array")
@@ -960,7 +999,7 @@ def render(scene, output_prefix, settings=None, depth_prepass=None):
             if len(face_indices) and (face_indices.min()<0 or face_indices.max()>=len(faces)):
                 raise ValueError('Invalid triangle_faces entry')
             try:
-                raster=rasterize_mesh(camverts,tris,camera,depth,depth_planes,mesh_owners,mesh_index)
+                raster=rasterize_mesh(camverts,tris,camera,depth,depth_planes,mesh_owners,mesh_index,alpha=mesh.get("_cpu_alpha"))
                 stats['triangles']+=raster['triangles']
                 stats['depth_backend']=raster['backend']
                 continue
@@ -994,6 +1033,7 @@ def render(scene, output_prefix, settings=None, depth_prepass=None):
     if mesh_owners is not None:
         group_image = np.where(mesh_owners >= 0, mesh_groups[np.maximum(0, mesh_owners)], -1)
     vectors = []
+    if progress:progress("intersections")
     masks=None;cull_stats=None
     from .brush_channels import needs_hidden_intersections
     if (line_only and cfg.get('visibility_cull',True) and (not elements or effect_layers) and
@@ -1021,7 +1061,8 @@ def render(scene, output_prefix, settings=None, depth_prepass=None):
     line_data = world_line_segments(scene, cfg,intersection_masks=masks,style_passes=styles,
                                    packed=line_only and cfg.get('compiled_segments',True),
                                    prepared_intersections=prepared_intersections,prepared_outlines=depth_prepass["outlines"] if depth_prepass is not None else None,
-                                   edge_visibility_masks=edge_masks)
+                                   edge_visibility_masks=edge_masks,progress=progress)
+    if progress:progress("visibility")
     visibility=None
     if refined:
         try:
@@ -1042,19 +1083,49 @@ def render(scene, output_prefix, settings=None, depth_prepass=None):
     geometry_finished=time.perf_counter()
     remaining_segments=line_data['segments']
     from .stroke_presets import cpu_segments
-    remaining_segments=cpu_segments(remaining_segments,camera,ss)
+    stream_brush = False
+    if effect_layers and line_only and cfg.get('compiled_segments',True) and not elements and group_image is None and hasattr(remaining_segments,'parts'):
+        remaining_segments._flush()
+        source_styles = list(remaining_segments.styles())
+        if len(source_styles) == 1:
+            brush = source_styles[0]
+            stream_brush = (brush.get('brush_preset') in (1, 2, 3)
+                            and bool(brush.get('width_depth_reduction'))
+                            and not any(brush.get(k) for k in ('brush_maps','line_pattern','width_profile','alpha_profile','hidden_lines','dash_length','distance_reduction','width_variation','taper'))
+                            and brush.get('_visibility_mode') != -1
+                            and all(not any(k in p for k in ('records','vertex_ids','profile_u')) for p in remaining_segments.parts))
+    if progress:progress("brush")
+    if not stream_brush:
+        remaining_segments=cpu_segments(remaining_segments,camera,ss)
+    if progress:progress("strokes",0,len(remaining_segments))
     effect_beauty=None
-    if effect_layers:
+    if stream_brush:
+        # The packed strokes and visibility forest own what rasterization needs.
+        # Release Maya's per-frame preparation arrays before brush expansion.
+        if depth_prepass is not None and depth_prepass.get('consumable',False):
+            from . import render_geometry_cache
+            for mesh in meshes:
+                mesh.pop('_render_camera_vertices',None)
+                geometry=mesh.get('_render_geometry')
+                if geometry is not None:
+                    geometry.pop('_bvh',None)
+                    geometry.pop('_edges',None)
+                    render_geometry_cache.geometry_changed(geometry)
+            depth_prepass.pop('outlines',None)
+            masks=edge_masks=None
+        effect_beauty,batch=brush_effects.render_streamed_brush(remaining_segments,camera,depth,depth_planes,visible,ss,visibility)
+        stats.update(batch);remaining_segments=[]
+    elif effect_layers:
         if not line_only:
             raise ValueError('Independent brush effects currently require CPU line-only output')
-        effect_beauty,batch=brush_effects.render(remaining_segments,camera,depth,depth_planes,visible,hidden,ss,visibility,compiled=cfg.get('compiled_segments',True),group_image=group_image,mesh_groups=mesh_groups,elements=elements)
+        effect_beauty,batch=brush_effects.render(remaining_segments,camera,depth,depth_planes,visible,hidden,ss,visibility,compiled=cfg.get('compiled_segments',True),group_image=group_image,mesh_groups=mesh_groups,elements=elements,map_textures=scene.get('brush_map_textures',{}))
         stats.update(batch);remaining_segments=[]
         warnings.append('Mixed-effect SVG/EPS use full-resolution flattened CPU images, not editable vector strokes. EPS has a white matte; filtered PNG elements retain coverage alpha.')
     if not effect_layers and line_only and cfg.get('compiled_segments',True):
         try:
             from .cpu_segments import render_segments
             batch=render_segments(remaining_segments,camera,depth,depth_planes,visible,hidden,ss,group_image,elements,
-                                  collect_vectors=cfg.get('auxiliary_outputs',True) or bool(elements),visibility=visibility)
+                                  collect_vectors=cfg.get('auxiliary_outputs',True) or bool(elements),visibility=visibility,progress=progress)
         except ImportError as error:
             warnings.append('Compiled CPU segment accelerator unavailable: %s; using reference segment processing' % error)
             batch=None
@@ -1084,6 +1155,7 @@ def render(scene, output_prefix, settings=None, depth_prepass=None):
         stats['profile_backend']='native-cpu-adaptive-bezier'
         warnings.append('Curve raster: projected-angle corner links and clockwise/anticlockwise loops are supported. Rectangle seams are replay-tested; irregular/subdivided loop origin and exact direction ties remain approximate. Branches and intersection pieces split; SVG/EPS use full-resolution raster composites.')
     for edge_index, segment in enumerate(remaining_segments):
+        if progress and edge_index%256==0:progress("strokes",edge_index,len(remaining_segments))
         mesh_index = segment["mesh_index"]
         local, kinds = segment["settings"], segment["features"]
         stats["classified_edges"] += 1
@@ -1243,6 +1315,7 @@ def render(scene, output_prefix, settings=None, depth_prepass=None):
                                 mesh=segment["mesh"], features=list(features), settings=local))
             if not local.get("output_to_elements_only", False):
                 stats["visible_segments" if vis else "hidden_segments"] += 1
+    if progress:progress("output")
     strokes_finished=time.perf_counter()
     # Maya owns this single-use prepass. Release it before output conversion,
     # while external callers' reusable prepasses retain their original lifetime.

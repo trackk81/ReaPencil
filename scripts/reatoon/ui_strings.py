@@ -1,5 +1,8 @@
 """User-facing English / Korean UI catalog."""
 STRINGS = {'Open Line Window': '라인 창 열기',
+ 'Show in Hypershade': '하이퍼셰이드로 보기',
+ 'Connect a map before showing it in Hypershade.': '하이퍼셰이드로 보려면 먼저 맵을 연결하세요.',
+ 'Could not open Hypershade.': '하이퍼셰이드를 열 수 없습니다.',
  'Pencil+ Scene Import / Migration': 'Pencil+ 장면 가져오기 / 이전',
  'Add Selected Edges Node': '선택 에지 노드 추가',
  'Delete Unused ReaPencil Nodes': '사용하지 않는 ReaPencil 노드 삭제',
@@ -409,3 +412,12 @@ STRINGS.update({'Fill width range from selection':'선택 오브젝트로 선폭
 STRINGS.update({'Width profile':'선폭 곡선','Alpha profile':'알파 곡선'})
 
 STRINGS.update({'Legacy depth width reduction (CPU)':'이전 방식 선폭 감소 (CPU)','Camera depth reduction':'카메라 깊이별 감소','Taper and variation apply to CPU rendering.\nStroke width and alpha profiles apply to normal preview and CPU rendering.':'끝 가늘게·굵기 변화는 CPU 렌더에 적용됩니다.\n선폭·알파 곡선은 일반 프리뷰와 CPU 렌더에 적용됩니다.'})
+
+
+# Compact per-feature brush navigation and inline map controls.
+STRINGS.update({'Edge': '선 종류', 'Specific Brush Settings': '전용 브러시 설정', 'Brush Settings': '브러시 설정', 'Use common brush': '공통 브러시 사용', 'Open the specific brush stored in this Line Set': '이 라인셋에 저장된 전용 브러시 설정 열기', 'Enable Specific Brush Settings first.': '먼저 전용 브러시 설정을 켜주세요.', 'Use color map': '색 맵 사용', 'Use width map': '선폭 맵 사용', 'Color map': '색 맵', 'Width map': '선폭 맵', 'Map opacity': '맵 불투명도', 'Map amount': '맵 적용량', 'Open map; right-click for connection options': '맵 열기 · 마우스 오른쪽 버튼: 맵 연결 메뉴', 'Load image': '이미지 불러오기', 'Connect selected texture': '선택한 텍스처 연결', 'Open map': '맵 열기', 'Disconnect map': '맵 연결 해제', 'UV set': 'UV 세트', 'UV set (blank = current)': 'UV 세트 (비움 = 현재)', 'Select one texture node': '텍스처 노드를 하나 선택하세요.', 'Maps: CPU render · 2D UV 0–1': '맵 적용: CPU 렌더 · 2D UV 0–1'})
+
+
+STRINGS.update({'Drop the texture node or its outColor output.': '텍스처 노드 또는 outColor 출력을 드롭하세요.', 'Drop one Maya 2D texture node.': 'Maya 2D 텍스처 노드를 하나 드롭하세요.', 'Brush maps support UV-based Maya 2D textures; 3D and projection maps are not supported.': '브러시 맵은 UV 기반 Maya 2D 텍스처를 지원합니다. 3D·투영 맵은 아직 지원하지 않습니다.', 'Brush editor was closed; the new texture was not connected.': '브러시 편집창이 닫혀 새 텍스처를 연결하지 않았습니다.', 'Middle-drag a Maya texture here': 'Maya 텍스처를 가운데 버튼으로 드롭', 'Middle-drag from Hypershade. Empty button: create a Maya map. Right-click: connection options.': '하이퍼셰이드에서 가운데 버튼으로 드롭하세요. 빈 버튼: Maya 맵 만들기 · 오른쪽 클릭: 연결 메뉴', 'Create Maya map': 'Maya 맵 만들기'})
+
+STRINGS['Maps: Normal Preview / CPU · 2D UV 0–1'] = '맵 적용: 일반 프리뷰 / CPU · 2D UV 0–1'

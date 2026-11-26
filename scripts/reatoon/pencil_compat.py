@@ -216,6 +216,21 @@ def _shader_targets(materials, report, source):
     return sorted(set(result))
 
 
+def _brush_maps(brush,report):
+    from .maya_brush_maps import binding
+    maps={}
+    for channel,attribute,toggle,amount in (('color','colorMap','colorMapOn','mapOpacity'),('width','sizeMap','sizeMapOn','sizeMapAmount')):
+        textures=_incoming(brush,attribute)
+        if not textures:continue
+        try:
+            maps[channel]=binding(textures[0],cmds,float(_get(brush,amount,1.)))
+            maps[channel]['enabled']=bool(_get(brush,toggle,True))
+        except ValueError as error:
+            _issue(report,brush,str(error))
+    if maps:_issue(report,brush,'Color/size map node bindings imported; CPU evaluates current-frame 2D UV tiles (256 x 256, UV 0..1 only). Preview and 3D/UDIM maps are not supported.')
+    return maps
+
+
 def _channel_brush(brush,report):
     """Supported independent brush snapshot; unsupported detail stays explicit."""
     value=dict(line_color=_get(brush,'color',[0,0,0]),line_width=max(.1,min(64.,float(_get(brush,'size',1)))),
@@ -235,6 +250,8 @@ def _channel_brush(brush,report):
             _issue(report,detail,'independent brush distortion/copies are not reproduced')
     if _incoming(brush,'color') or _incoming(brush,'size'):
         _issue(report,brush,'Independent brush texture/procedural inputs sampled at current frame')
+    maps=_brush_maps(brush,report)
+    if maps:value['brush_maps']=maps
     return value
 
 
@@ -350,8 +367,8 @@ def inspect_scene():
                         brush = brushes[0]
                         alpha_scale=1.
                         overrides[color_key] = _get(brush, 'color', [0,0,0])
-                        if cmds.listConnections(brush,source=True,destination=False):
-                            _issue(report,node,'brush maps/detail/animated inputs sampled or ignored')
+                        if _incoming(brush,'color') or _incoming(brush,'size'):
+                            _issue(report,node,'Direct color/size inputs sampled at current frame; texture map inputs remain live')
                         if prefix == visible:
                             if not .1 <= float(_get(brush,'size',1)) <= 64:
                                 _issue(report,node,'brush size clamped to 0.1..64 pixels')
@@ -378,6 +395,8 @@ def inspect_scene():
                             overrides['line_opacity']=float(_get(brush,'blendAmount',1.))*alpha_scale
                             overrides['blend_mode']=int(_get(brush,'blendMode',0))
                             overrides['brush_key']=_uuid(brush)
+                            maps=_brush_maps(brush,report)
+                            if maps:overrides['brush_maps']=maps
                 if overrides['hidden_lines']:
                     h={key:bool(_get(node,hidden+attr,False)) for key,attr in mapping.items()}
                     h['open_edges'] &= h['outline'];h['self_intersections'] &= h['intersections']
@@ -528,7 +547,16 @@ def import_scene():
     else:
         cmds.undoInfo(closeChunk=True)
     finally:
-        cmds.select(selection,replace=True) if selection else cmds.select(clear=True)
+        # Stored component paths can point at geometry removed by reference edits.
+        # Restore the surviving items without masking the import result or error.
+        from maya.api import OpenMaya as om
+        restored = om.MSelectionList()
+        for name in selection:
+            try:
+                restored.add(name)
+            except (RuntimeError, ValueError):
+                continue
+        om.MGlobal.setActiveSelectionList(restored)
     return report
 
 

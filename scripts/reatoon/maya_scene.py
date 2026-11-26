@@ -10,6 +10,7 @@ from maya import cmds
 from maya.api import OpenMaya as om
 
 DEFAULT_SETTINGS = {
+    "brush_maps": {},
     "line_image": {}, "brush_image": {}, "brush_stamp_spacing": 24.0,
     "brush_roughness": 1.0, "brush_density": 1.0, "brush_width_scale": 1.0,
     "line_pattern": 0, "brush_preset": 0, "pattern_period": 20.0, "pattern_amplitude": 3.0,
@@ -82,7 +83,10 @@ def validate_settings(values, partial=False):
         if key not in DEFAULT_SETTINGS:
             raise ValueError("Unknown setting: " + str(key))
         default = DEFAULT_SETTINGS[key]
-        if key in ("line_image","brush_image"):
+        if key == 'brush_maps':
+            from .maya_brush_maps import validate
+            value=validate(value)
+        elif key in ("line_image","brush_image"):
             from .png_pattern import validate
             value=validate(value)
         elif key in ("feature_brushes","hidden_style"):
@@ -280,15 +284,15 @@ def _camera(name, aspect):
     up.normalize()
     left, right, bottom, top = fn.getRenderingFrustum(aspect)
     near = float(fn.nearClippingPlane)
-    if abs(left + right) > 1e-6 or abs(top + bottom) > 1e-6:
-        raise ValueError("Camera film offsets/asymmetric frusta are not supported; use a centered camera.")
+    asymmetric = abs(left + right) > 1e-6 or abs(top + bottom) > 1e-6
     vertical_fov = math.degrees(2 * math.atan((top - bottom) / (2 * near)))
     return {"position": [eye.x, eye.y, eye.z],
             "target": [eye.x + forward.x, eye.y + forward.y, eye.z + forward.z],
             "up": [up.x, up.y, up.z],
             "projection": "orthographic" if fn.isOrtho() else "perspective",
             "fov_y": 45.0 if fn.isOrtho() else vertical_fov, "ortho_width": float(fn.orthoWidth),
-            "near": near, "far": float(fn.farClippingPlane), "film_aspect":float(aspect), "name": path.fullPathName()}
+            "near": near, "far": float(fn.farClippingPlane), "film_aspect":float(aspect), "name": path.fullPathName(),
+            **({"render_frustum": [left, right, bottom, top]} if asymmetric else {})}
 
 
 def _color(node, attr, default):
@@ -350,7 +354,7 @@ def _line_membership(path, line_sets):
     return chosen, edges
 
 
-def export_scene(camera=None, settings=None, camera_override=None, include_normals=True, geometry_purpose="render", include_materials=True, as_arrays=False, mesh_filter=None, geometry_cache=None, mesh_ready=None, alpha_configuration=None, alpha_transform=None):
+def export_scene(camera=None, settings=None, camera_override=None, include_normals=True, geometry_purpose="render", include_materials=True, as_arrays=False, mesh_filter=None, geometry_cache=None, mesh_ready=None, alpha_configuration=None, alpha_transform=None, allow_empty=False, progress=None):
     from . import line_graph
     from .mesh_surface import mesh_function
     from . import smooth_geometry
@@ -372,6 +376,11 @@ def export_scene(camera=None, settings=None, camera_override=None, include_norma
               "line_sets": {n: v for n, _, v in line_sets}}
     if graph_enabled:
         result["line_sets"] = {target["node"]: target["settings"] for line in graph for target in line["sets"]}
+    # Maya evaluation stays on the main thread; workers consume frozen maps.
+    if geometry_purpose=='render':
+        from .maya_brush_maps import freeze_scene_maps
+        result['settings']=settings
+        freeze_scene_maps(result,cmds)
     lights = (cmds.ls(type="directionalLight", long=True) or []) if include_materials else []
     lights = [name for name in lights if _dag(name).isVisible()]
     if lights:
@@ -387,7 +396,9 @@ def export_scene(camera=None, settings=None, camera_override=None, include_norma
     surface_records=surface_lines.records()
     native_ready=False;shader_cache={}
     global_smooth_type=cmds.optionVar(query='globalPolyDefaultSmoothDrawType') if geometry_purpose=='render' else None
-    for name in cmds.ls(type="mesh", long=True, allPaths=True) or []:
+    mesh_names = cmds.ls(type="mesh", long=True, allPaths=True) or []
+    for mesh_number, name in enumerate(mesh_names):
+        if progress:progress("export", mesh_number, len(mesh_names), name)
         if geometry_purpose=='viewport' and mesh_filter is not None and name not in mesh_filter:continue
         path = _dag(name)
         if om.MFnDagNode(path).isIntermediateObject or not path.isVisible():
@@ -398,7 +409,8 @@ def export_scene(camera=None, settings=None, camera_override=None, include_norma
         if source_fn is None:
             continue
         alpha_config=(alpha_configuration(name) if alpha_configuration is not None else
-                      alpha_boundary.configuration(name,source_fn))
+                      (alpha_boundary.render_configuration(name,source_fn) if geometry_purpose=='render' else
+                       alpha_boundary.configuration(name,source_fn)))
         shading_engines, ids = source_fn.getConnectedShaders(path.instanceNumber())
         if as_arrays:ids=np.asarray(ids,dtype=np.int64)
         chosen, selected = _line_membership(path, line_sets)
@@ -500,10 +512,24 @@ def export_scene(camera=None, settings=None, camera_override=None, include_norma
         elif chosen:
             mesh["line_set"] = chosen
         surface_lines.attach(mesh,evaluated,surface_records.get(name,[]),warnings)
+        if geometry_purpose=='render':
+            from .brush_map_geometry import export_uv_sets
+            map_base=result.get('settings',settings)
+            if passes is not None:
+                used={key for p in mesh.get('line_passes',[]) for key in p['face_line_sets'] if key is not None}
+                used.update(key for p in mesh.get('line_passes',[]) for key in p.get('selected_edges',{}))
+                map_styles=[dict(map_base,**result['line_sets'].get(key,{})) for key in used]
+            else:map_styles=[dict(map_base,**result['line_sets'].get(chosen,{}))]
+            export_uv_sets(mesh,path,evaluated,map_styles)
         if alpha_config:
+            if progress:progress("alpha", mesh_number, len(mesh_names), name)
             evaluated['purpose']=geometry_purpose
             if alpha_transform is None:
-                alpha_boundary.transform_mesh(mesh,path,evaluated,alpha_config)
+                if geometry_purpose=='render':
+                    from .cpu_alpha import transform_mesh
+                    transform_mesh(mesh,path,evaluated,alpha_config)
+                    if mesh.get('cpu_alpha_warning'):warnings.append(mesh['cpu_alpha_warning'])
+                else:alpha_boundary.transform_mesh(mesh,path,evaluated,alpha_config)
             else:
                 alpha_transform(mesh,path,evaluated,alpha_config)
                 if mesh.get('viewport_alpha_fallback'):
@@ -518,12 +544,12 @@ def export_scene(camera=None, settings=None, camera_override=None, include_norma
     result["merge_groups"] = line_graph.export_merge_groups(result["meshes"])
     result["render_elements"] = render_elements.snapshot()
     result["scene_name"] = os.path.splitext(os.path.basename(cmds.file(query=True, sceneName=True) or "untitled"))[0]
-    if not result["meshes"] and not result.get('alpha_empty') and not (geometry_purpose=='viewport' and mesh_filter is not None):
+    if not allow_empty and not result["meshes"] and not result.get('alpha_empty') and not (geometry_purpose=='viewport' and mesh_filter is not None):
         raise ValueError("No visible polygon meshes to render.")
     return result
 
 
-def render_scene(output_prefix, camera=None, settings=None, write_scene=False, auxiliary_outputs=True,exact_visibility=True):
+def render_scene(output_prefix, camera=None, settings=None, write_scene=False, auxiliary_outputs=True,exact_visibility=True,progress=None):
     from . import renderer
     values = validate_settings(settings or load_settings())
     started=time.perf_counter()
@@ -558,7 +584,7 @@ def render_scene(output_prefix, camera=None, settings=None, write_scene=False, a
         from .cpu_depth import rasterize_mesh
         camera=prepass['camera']
         vertices=(np.asarray(mesh['vertices'],np.float64)-camera['eye']) @ camera['basis'].T
-        result=rasterize_mesh(vertices,mesh['triangles'],camera,prepass['depth'],prepass['planes'],prepass['owners'],index)
+        result=rasterize_mesh(vertices,mesh['triangles'],camera,prepass['depth'],prepass['planes'],prepass['owners'],index,alpha=mesh.get('_cpu_alpha'))
         mesh['_render_camera_vertices']=vertices
         prepass['counts'].append(result['triangles']);prepass['backend']=result['backend']
     # One ordered depth worker retains mesh ownership on exact depth ties.
@@ -576,10 +602,20 @@ def render_scene(output_prefix, camera=None, settings=None, write_scene=False, a
                 depth_tasks.append(depth_worker.submit(prepare_depth,mesh,index))
             if '_render_geometry' in mesh or prepass is not None:pending.append(workers.submit(prepare_cpu,mesh,index))
         scene = export_scene(camera, values,camera_override=camera_data,include_normals=False,
-                             include_materials=False,as_arrays=True,mesh_ready=ready)
-        for task in pending+depth_tasks:task.result()
+                             include_materials=False,as_arrays=True,mesh_ready=ready,allow_empty=True,progress=progress)
+        tasks=pending+depth_tasks
+        for task in tasks:
+            if progress:
+                from concurrent.futures import wait
+                while not task.done():
+                    progress('depth',sum(t.done() for t in tasks),len(tasks))
+                    wait([task],timeout=.15)
+            task.result()
+        if progress:progress('depth',len(tasks),len(tasks))
     export_finished=time.perf_counter()
     values["line_sets"] = scene["line_sets"]
+    if 'settings' in scene:values.update(scene['settings'])
+    values['line_sets']=scene['line_sets']
     # Maya's RevToon renderer is a line pass. Surface shading remains available
     # only to standalone reference-renderer callers that explicitly use it.
     values['line_only']=True
@@ -598,7 +634,7 @@ def render_scene(output_prefix, camera=None, settings=None, write_scene=False, a
     snapshot_finished=time.perf_counter()
     from . import render_geometry_cache
     try:
-        result = renderer.render(scene, output_prefix, values,depth_prepass=prepass)
+        result = renderer.render(scene, output_prefix, values,depth_prepass=prepass,progress=progress)
     finally:
         render_geometry_cache.trim()
     result["geometry_cache"]=render_geometry_cache.stats()
